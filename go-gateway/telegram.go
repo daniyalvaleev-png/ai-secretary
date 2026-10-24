@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// Таймаут больше 30 сек, потому что getUpdates висит до 30 сек (long polling)
+var tgHTTP = &http.Client{Timeout: 40 * time.Second}
 
 func shouldSendTelegramAlert(d EmailDecision) bool {
 	urgency := strings.ToLower(strings.TrimSpace(d.Urgency))
@@ -28,35 +31,15 @@ func buildTelegramAlert(from, subject string, d EmailDecision) string {
 	b.WriteString("Тема: " + subject + "\n\n")
 	b.WriteString("Срочность: " + d.Urgency + "\n")
 	b.WriteString("Нужно подтверждение: " + fmt.Sprintf("%t", d.RequiresConfirmation) + "\n")
-	b.WriteString("Действие: " + d.SuggestedAction + "\n\n")
-	b.WriteString("Позже здесь будут кнопки:\n")
-	b.WriteString("[Подтвердить] [Отклонить] [Показать письмо]\n")
+	b.WriteString("Действие: " + d.SuggestedAction)
 
 	return b.String()
 }
 
-func sendTelegramMessage(token, chatID, text string) error {
+// tgCall — один вызов Telegram Bot API. Если out != nil, туда кладётся поле result.
+func tgCall(token, method string, payload any, out any) error {
 	if strings.TrimSpace(token) == "" {
 		return fmt.Errorf("не задан TELEGRAM_BOT_TOKEN")
-	}
-
-	if strings.TrimSpace(chatID) == "" {
-		return fmt.Errorf("не задан TELEGRAM_CHAT_ID")
-	}
-
-	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
-
-	// Telegram принимает chat_id как число или строку.
-	// Если получается распарсить в число — отправляем числом.
-	chatIDValue := any(chatID)
-	if parsed, err := strconv.ParseInt(chatID, 10, 64); err == nil {
-		chatIDValue = parsed
-	}
-
-	payload := map[string]any{
-		"chat_id":                  chatIDValue,
-		"text":                     text,
-		"disable_web_page_preview": true,
 	}
 
 	body, err := json.Marshal(payload)
@@ -64,44 +47,192 @@ func sendTelegramMessage(token, chatID, text string) error {
 		return err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, apiURL, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
+	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/%s", token, method)
 
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{
-		Timeout: 15 * time.Second,
-	}
-
-	resp, err := client.Do(req)
+	resp, err := tgHTTP.Post(apiURL, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("telegram HTTP %d: %s", resp.StatusCode, string(respBody))
-	}
-
 	var tgResp struct {
-		Ok          bool   `json:"ok"`
-		Description string `json:"description"`
+		Ok          bool            `json:"ok"`
+		Description string          `json:"description"`
+		Result      json.RawMessage `json:"result"`
 	}
 
-	if err := json.Unmarshal(respBody, &tgResp); err != nil {
-		return fmt.Errorf("не удалось разобрать ответ Telegram: %w; сырой ответ: %s", err, string(respBody))
+	if err := json.NewDecoder(resp.Body).Decode(&tgResp); err != nil {
+		return fmt.Errorf("telegram %s: не удалось разобрать ответ (HTTP %d): %w", method, resp.StatusCode, err)
 	}
 
 	if !tgResp.Ok {
-		return fmt.Errorf("telegram API error: %s", tgResp.Description)
+		return fmt.Errorf("telegram %s: %s", method, tgResp.Description)
+	}
+
+	if out != nil {
+		return json.Unmarshal(tgResp.Result, out)
 	}
 
 	return nil
+}
+
+// Telegram принимает chat_id как число или строку.
+// Если получается распарсить в число — отправляем числом.
+func chatIDValue(chatID string) any {
+	if parsed, err := strconv.ParseInt(chatID, 10, 64); err == nil {
+		return parsed
+	}
+	return chatID
+}
+
+func sendTelegramMessage(token, chatID, text string) error {
+	return tgCall(token, "sendMessage", map[string]any{
+		"chat_id":                  chatIDValue(chatID),
+		"text":                     text,
+		"disable_web_page_preview": true,
+	}, nil)
+}
+
+// sendEmailAlert — уведомление о письме с кнопками под ним
+func sendEmailAlert(token, chatID string, uid uint32, text string) error {
+	id := strconv.FormatUint(uint64(uid), 10)
+
+	keyboard := map[string]any{
+		"inline_keyboard": [][]map[string]string{
+			{
+				{"text": "✅ Подтвердить", "callback_data": "confirm:" + id},
+				{"text": "❌ Отклонить", "callback_data": "reject:" + id},
+			},
+			{
+				{"text": "📄 Показать письмо", "callback_data": "show:" + id},
+			},
+		},
+	}
+
+	return tgCall(token, "sendMessage", map[string]any{
+		"chat_id":                  chatIDValue(chatID),
+		"text":                     text,
+		"disable_web_page_preview": true,
+		"reply_markup":             keyboard,
+	}, nil)
+}
+
+type tgCallback struct {
+	ID      string `json:"id"`
+	Data    string `json:"data"`
+	Message *struct {
+		MessageID int64  `json:"message_id"`
+		Text      string `json:"text"`
+		Chat      struct {
+			ID int64 `json:"id"`
+		} `json:"chat"`
+	} `json:"message"`
+}
+
+type tgUpdate struct {
+	UpdateID      int64       `json:"update_id"`
+	CallbackQuery *tgCallback `json:"callback_query"`
+}
+
+// runTelegramBot крутится в отдельной горутине и ловит нажатия кнопок (long polling)
+func runTelegramBot(token, chatID string) {
+	log.Println("🤖 Telegram-бот слушает кнопки")
+
+	var offset int64
+	for {
+		var updates []tgUpdate
+		err := tgCall(token, "getUpdates", map[string]any{
+			"offset":          offset,
+			"timeout":         30,
+			"allowed_updates": []string{"callback_query"},
+		}, &updates)
+		if err != nil {
+			log.Printf("⚠️ getUpdates: %v", err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		for _, u := range updates {
+			// offset = последний update_id + 1, иначе Telegram будет слать те же нажатия снова
+			offset = u.UpdateID + 1
+			if u.CallbackQuery != nil {
+				handleCallback(token, chatID, u.CallbackQuery)
+			}
+		}
+	}
+}
+
+func answerCallback(token, callbackID, text string) {
+	if err := tgCall(token, "answerCallbackQuery", map[string]any{
+		"callback_query_id": callbackID,
+		"text":              text,
+	}, nil); err != nil {
+		log.Printf("⚠️ answerCallbackQuery: %v", err)
+	}
+}
+
+func handleCallback(token, chatID string, cb *tgCallback) {
+	if cb.Message == nil {
+		answerCallback(token, cb.ID, "Сообщение слишком старое")
+		return
+	}
+
+	// Кнопки жмёт только твой чат, чужим — болт
+	if strconv.FormatInt(cb.Message.Chat.ID, 10) != chatID {
+		answerCallback(token, cb.ID, "Нет доступа")
+		return
+	}
+
+	action, idStr, _ := strings.Cut(cb.Data, ":")
+	uid64, err := strconv.ParseUint(idStr, 10, 32)
+	if err != nil {
+		answerCallback(token, cb.ID, "Кривые данные кнопки")
+		return
+	}
+	uid := uint32(uid64)
+
+	e, found := getEmail(uid)
+	if !found {
+		answerCallback(token, cb.ID, "Письмо не найдено в базе")
+		return
+	}
+
+	switch action {
+	case "confirm", "reject":
+		if e.Status != "pending" {
+			answerCallback(token, cb.ID, "Уже обработано: "+e.Status)
+			return
+		}
+
+		status, label := "confirmed", "✅ Подтверждено"
+		if action == "reject" {
+			status, label = "rejected", "❌ Отклонено"
+		}
+
+		updateEmailStatus(uid, status)
+		answerCallback(token, cb.ID, label)
+		log.Printf("👆 UID %d → %s", uid, status)
+
+		// Переписываем сообщение без reply_markup — кнопки пропадают
+		if err := tgCall(token, "editMessageText", map[string]any{
+			"chat_id":    cb.Message.Chat.ID,
+			"message_id": cb.Message.MessageID,
+			"text":       cb.Message.Text + "\n\n" + label,
+		}, nil); err != nil {
+			log.Printf("⚠️ editMessageText: %v", err)
+		}
+
+	case "show":
+		answerCallback(token, cb.ID, "")
+
+		// Лимит Telegram — 4096 символов, поэтому тело режем
+		text := fmt.Sprintf("📄 Письмо UID %d\nОт: %s\nТема: %s\n\n%s",
+			e.UID, e.From, e.Subject, truncate(e.Body, 3500))
+		if err := sendTelegramMessage(token, chatID, text); err != nil {
+			log.Printf("⚠️ Не удалось показать письмо: %v", err)
+		}
+
+	default:
+		answerCallback(token, cb.ID, "Неизвестная кнопка")
+	}
 }

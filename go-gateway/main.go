@@ -85,6 +85,10 @@ func main() {
 	loadProcessedUIDs()
 	loadEmails()
 
+	if cfg.TgToken != "" && cfg.TgChatID != "" {
+		go runTelegramBot(cfg.TgToken, cfg.TgChatID)
+	}
+
 	log.Printf("🚀 Шлюз запущен, проверяю почту каждые %s (Ctrl+C — стоп)", cfg.Interval)
 
 	for {
@@ -245,7 +249,7 @@ func processMessage(c *client.Client, cfg Config, msg *imap.Message) {
 	if shouldSendTelegramAlert(decision) {
 		if cfg.TgToken == "" || cfg.TgChatID == "" {
 			log.Println("⚠️ Telegram не настроен. Добавь TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID в .env")
-		} else if err := sendTelegramMessage(cfg.TgToken, cfg.TgChatID, buildTelegramAlert(from, subject, decision)); err != nil {
+		} else if err := sendEmailAlert(cfg.TgToken, cfg.TgChatID, msg.Uid, buildTelegramAlert(from, subject, decision)); err != nil {
 			log.Printf("⚠️ Не удалось отправить в Telegram: %v", err)
 		} else {
 			log.Println("📨 Уведомление отправлено в Telegram")
