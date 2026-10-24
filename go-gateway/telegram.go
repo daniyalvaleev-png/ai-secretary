@@ -51,7 +51,8 @@ func tgCall(token, method string, payload any, out any) error {
 
 	resp, err := tgHTTP.Post(apiURL, "application/json", bytes.NewReader(body))
 	if err != nil {
-		return err
+		// Go кладёт URL с токеном в текст ошибки — вырезаем, чтобы не светить в логах
+		return fmt.Errorf("telegram %s: %s", method, strings.ReplaceAll(err.Error(), token, "***"))
 	}
 	defer resp.Body.Close()
 
@@ -143,7 +144,7 @@ func runTelegramBot(token, chatID string) {
 		var updates []tgUpdate
 		err := tgCall(token, "getUpdates", map[string]any{
 			"offset":          offset,
-			"timeout":         30,
+			"timeout":         20,
 			"allowed_updates": []string{"callback_query"},
 		}, &updates)
 		if err != nil {
