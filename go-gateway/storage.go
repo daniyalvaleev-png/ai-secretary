@@ -130,6 +130,31 @@ func getEmail(uid uint32) (StoredEmail, bool) {
 	return e, true
 }
 
+// listEmails — последние письма, новые сверху. status == "" — все статусы.
+func listEmails(status string, limit int) ([]StoredEmail, error) {
+	rows, err := db.Query(`SELECT uid, from_addr, subject, body, received_at, urgency, requires_confirmation, suggested_action, status
+		FROM emails
+		WHERE ? = '' OR status = ?
+		ORDER BY received_at DESC
+		LIMIT ?`, status, status, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	// Пустой срез, а не nil — чтобы в JSON был [], а не null
+	emails := []StoredEmail{}
+	for rows.Next() {
+		var e StoredEmail
+		if err := rows.Scan(&e.UID, &e.From, &e.Subject, &e.Body, &e.ReceivedAt, &e.Urgency, &e.RequiresConfirmation, &e.SuggestedAction, &e.Status); err != nil {
+			return nil, err
+		}
+		emails = append(emails, e)
+	}
+
+	return emails, rows.Err()
+}
+
 func updateEmailStatus(uid uint32, status string) bool {
 	res, err := db.Exec(`UPDATE emails SET status = ? WHERE uid = ?`, status, uid)
 	if err != nil {

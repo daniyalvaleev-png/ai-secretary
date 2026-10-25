@@ -83,6 +83,7 @@ func main() {
 		log.Fatalf("Не поднялась база %s: %v", dbFile, err)
 	}
 	defer db.Close()
+	go startAPI(getenvDefault("API_ADDR", "127.0.0.1:8080"), os.Getenv("API_KEY"))
 
 	if cfg.TgToken != "" && cfg.TgChatID != "" {
 		go runTelegramBot(cfg.TgToken, cfg.TgChatID)
