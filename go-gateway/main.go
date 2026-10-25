@@ -23,10 +23,6 @@ import (
 	"github.com/joho/godotenv"
 )
 
-var processedUIDs = map[uint32]bool{}
-
-const processedFile = "processed_uids.json"
-
 type OllamaRequest struct {
 	Model   string                 `json:"model"`
 	Prompt  string                 `json:"prompt"`
@@ -82,8 +78,11 @@ func main() {
 	}
 
 	cfg := loadConfig()
-	loadProcessedUIDs()
-	loadEmails()
+
+	if err := initDB(); err != nil {
+		log.Fatalf("Не поднялась база %s: %v", dbFile, err)
+	}
+	defer db.Close()
 
 	if cfg.TgToken != "" && cfg.TgChatID != "" {
 		go runTelegramBot(cfg.TgToken, cfg.TgChatID)
@@ -125,7 +124,7 @@ func checkMail(cfg Config) error {
 	// Отсекаем уже обработанные ДО скачивания
 	var fresh []uint32
 	for _, uid := range uids {
-		if !processedUIDs[uid] {
+		if !isProcessed(uid) {
 			fresh = append(fresh, uid)
 		}
 	}
@@ -297,28 +296,8 @@ func markSeen(_ *client.Client, _ uint32) {
 }
 
 func markProcessed(c *client.Client, uid uint32) {
-	processedUIDs[uid] = true
-	saveProcessedUIDs()
-
+	markUIDProcessed(uid)
 	markSeen(c, uid)
-}
-
-func loadProcessedUIDs() {
-	data, err := os.ReadFile(processedFile)
-	if err != nil {
-		return
-	}
-
-	_ = json.Unmarshal(data, &processedUIDs)
-}
-
-func saveProcessedUIDs() {
-	data, err := json.MarshalIndent(processedUIDs, "", "  ")
-	if err != nil {
-		return
-	}
-
-	_ = os.WriteFile(processedFile, data, 0644)
 }
 
 func decodeBody(r io.Reader, transferEncoding string) ([]byte, error) {

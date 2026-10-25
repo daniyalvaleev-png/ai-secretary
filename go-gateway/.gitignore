@@ -1,3 +1,5 @@
 .env
 processed_uids.json
 emails.json
+secretary.db*
+*.migrated
