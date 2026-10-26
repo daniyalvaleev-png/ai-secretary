@@ -133,11 +133,13 @@ type tgCallback struct {
 type tgUpdate struct {
 	UpdateID      int64       `json:"update_id"`
 	CallbackQuery *tgCallback `json:"callback_query"`
+	Message       *tgMessage  `json:"message"`
 }
 
 // runTelegramBot крутится в отдельной горутине и ловит нажатия кнопок (long polling)
 func runTelegramBot(token, chatID, agentURL string, mailer ReplySender) {
 	log.Println("🤖 Telegram-бот слушает кнопки")
+	setBotCommands(token)
 
 	var offset int64
 	for {
@@ -145,7 +147,7 @@ func runTelegramBot(token, chatID, agentURL string, mailer ReplySender) {
 		err := tgCall(token, "getUpdates", map[string]any{
 			"offset":          offset,
 			"timeout":         20,
-			"allowed_updates": []string{"callback_query"},
+			"allowed_updates": []string{"callback_query", "message"},
 		}, &updates)
 		if err != nil {
 			log.Printf("⚠️ getUpdates: %v", err)
@@ -158,6 +160,9 @@ func runTelegramBot(token, chatID, agentURL string, mailer ReplySender) {
 			offset = u.UpdateID + 1
 			if u.CallbackQuery != nil {
 				handleCallback(token, chatID, agentURL, mailer, u.CallbackQuery)
+			}
+			if u.Message != nil {
+				handleCommand(token, chatID, u.Message)
 			}
 		}
 	}
@@ -289,39 +294,6 @@ func handleCallback(token, chatID, agentURL string, mailer ReplySender, cb *tgCa
 	}
 }
 
-// draftAndSend крутится в своей горутине: агент думает до минуты,
-// а бот в это время должен дальше ловить другие кнопки
-func draftAndSend(token, chatID, agentURL string, e StoredEmail) {
-	resp, err := requestDraft(agentURL, e)
-	if err != nil {
-		log.Printf("❌ Черновик для UID %d: %v", e.UID, err)
-		updateEmailStatus(e.UID, "draft_failed")
-
-		text := fmt.Sprintf("⚠️ Не получилось написать черновик для «%s»:\n%v", e.Subject, err)
-		if err := sendWithKeyboard(token, chatID, text, [][]map[string]string{
-			{button("🔄 Повторить", "redraft", e.UID), button("🙅 Не отвечать", "skip", e.UID)},
-		}); err != nil {
-			log.Printf("⚠️ Telegram: %v", err)
-		}
-		return
-	}
-
-	saveDraft(e.UID, resp.Draft)
-	log.Printf("✍️ Черновик для UID %d готов (попыток: %d)", e.UID, resp.Attempts)
-
-	text := fmt.Sprintf("✍️ Черновик ответа\nКому: %s\nТема: Re: %s\n\n%s", e.From, e.Subject, resp.Draft)
-	if resp.Problems != "" {
-		text += "\n\n⚠️ Агент так и не справился: " + resp.Problems
-	}
-
-	if err := sendWithKeyboard(token, chatID, text, [][]map[string]string{
-		{button("📤 Отправить", "send", e.UID), button("🔄 Переписать", "redraft", e.UID)},
-		{button("🙅 Не отвечать", "skip", e.UID)},
-	}); err != nil {
-		log.Printf("⚠️ Не удалось отправить черновик в Telegram: %v", err)
-	}
-}
-
 // sendAndReport отправляет ответ по SMTP в своей горутине и пишет в Telegram, чем кончилось
 func sendAndReport(token, chatID string, mailer ReplySender, e StoredEmail) {
 	if err := mailer.SendReply(e); err != nil {
@@ -344,5 +316,126 @@ func sendAndReport(token, chatID string, mailer ReplySender, e StoredEmail) {
 
 	if err := sendTelegramMessage(token, chatID, fmt.Sprintf("✅ Ответ на «%s» отправлен → %s", e.Subject, e.From)); err != nil {
 		log.Printf("⚠️ Telegram: %v", err)
+	}
+}
+
+// draftAndSend крутится в своей горутине: агент думает до минуты,
+// а бот в это время должен дальше ловить другие кнопки
+func draftAndSend(token, chatID, agentURL string, e StoredEmail) {
+	resp, err := requestDraft(agentURL, e)
+	if err != nil {
+		log.Printf("❌ Черновик для UID %d: %v", e.UID, err)
+		updateEmailStatus(e.UID, "draft_failed")
+
+		if err := sendDraftFailed(token, chatID, e, err.Error()); err != nil {
+			log.Printf("⚠️ Telegram: %v (письмо найдётся через /pending)", err)
+		}
+		return
+	}
+
+	saveDraft(e.UID, resp.Draft)
+	e.Draft = resp.Draft
+	log.Printf("✍️ Черновик для UID %d готов (попыток: %d)", e.UID, resp.Attempts)
+
+	if err := sendDraftMessage(token, chatID, e, resp.Problems); err != nil {
+		log.Printf("⚠️ Не удалось отправить черновик в Telegram: %v (письмо найдётся через /pending)", err)
+	}
+}
+
+// sendDraftMessage — черновик с кнопками «Отправить / Переписать / Не отвечать»
+func sendDraftMessage(token, chatID string, e StoredEmail, problems string) error {
+	text := fmt.Sprintf("✍️ Черновик ответа\nКому: %s\nТема: Re: %s\n\n%s", e.From, e.Subject, e.Draft)
+	if problems != "" {
+		text += "\n\n⚠️ Агент так и не справился: " + problems
+	}
+
+	return sendWithKeyboard(token, chatID, text, [][]map[string]string{
+		{button("📤 Отправить", "send", e.UID), button("🔄 Переписать", "redraft", e.UID)},
+		{button("🙅 Не отвечать", "skip", e.UID)},
+	})
+}
+
+// sendDraftFailed — «черновик не получился» с кнопками «Повторить / Не отвечать»
+func sendDraftFailed(token, chatID string, e StoredEmail, reason string) error {
+	text := fmt.Sprintf("⚠️ Не получилось написать черновик для «%s»:\n%s", e.Subject, reason)
+
+	return sendWithKeyboard(token, chatID, text, [][]map[string]string{
+		{button("🔄 Повторить", "redraft", e.UID), button("🙅 Не отвечать", "skip", e.UID)},
+	})
+}
+
+type tgMessage struct {
+	Text string `json:"text"`
+	Chat struct {
+		ID int64 `json:"id"`
+	} `json:"chat"`
+}
+
+// setBotCommands — команды появятся в меню бота (кнопка «/» слева от поля ввода)
+func setBotCommands(token string) {
+	if err := tgCall(token, "setMyCommands", map[string]any{
+		"commands": []map[string]string{
+			{"command": "pending", "description": "Письма, которые ждут решения"},
+		},
+	}, nil); err != nil {
+		log.Printf("⚠️ setMyCommands: %v", err)
+	}
+}
+
+func handleCommand(token, chatID string, m *tgMessage) {
+	// Команды принимаем только из своего чата, остальных молча игнорим
+	if strconv.FormatInt(m.Chat.ID, 10) != chatID {
+		return
+	}
+
+	cmd, _, _ := strings.Cut(strings.TrimSpace(m.Text), " ")
+	cmd, _, _ = strings.Cut(cmd, "@") // в группах команда приходит как /pending@ИмяБота
+
+	switch cmd {
+	case "/pending":
+		log.Println("📋 /pending")
+		sendPendingList(token, chatID)
+	case "/start", "/help":
+		if err := sendTelegramMessage(token, chatID, "Я ИИ-секретарь. Новые письма присылаю сам.\n/pending — письма, которые ждут твоего решения"); err != nil {
+			log.Printf("⚠️ Telegram: %v", err)
+		}
+	}
+}
+
+// sendPendingList заново присылает все письма, где ход за тобой, — с живыми кнопками.
+// Старые сообщения по этим письмам не мешают: transitionStatus не даст нажать одно и то же дважды.
+func sendPendingList(token, chatID string) {
+	total := 0
+
+	for _, status := range []string{"pending", "draft_failed", "draft_ready"} {
+		emails, err := listEmails(status, 10)
+		if err != nil {
+			log.Printf("⚠️ /pending: %v", err)
+			continue
+		}
+
+		for _, e := range emails {
+			var err error
+			switch status {
+			case "pending":
+				d := EmailDecision{Urgency: e.Urgency, RequiresConfirmation: e.RequiresConfirmation, SuggestedAction: e.SuggestedAction}
+				err = sendEmailAlert(token, chatID, e.UID, buildTelegramAlert(e.From, e.Subject, d))
+			case "draft_failed":
+				err = sendDraftFailed(token, chatID, e, "черновик так и не дописался")
+			case "draft_ready":
+				err = sendDraftMessage(token, chatID, e, "")
+			}
+			if err != nil {
+				log.Printf("⚠️ /pending UID %d: %v", e.UID, err)
+				continue
+			}
+			total++
+		}
+	}
+
+	if total == 0 {
+		if err := sendTelegramMessage(token, chatID, "🎉 Ничего не висит, всё разобрано"); err != nil {
+			log.Printf("⚠️ Telegram: %v", err)
+		}
 	}
 }

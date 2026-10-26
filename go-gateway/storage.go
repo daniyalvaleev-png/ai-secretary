@@ -224,3 +224,23 @@ func markUIDProcessed(uid uint32) {
 		log.Printf("⚠️ Не удалось пометить UID %d обработанным: %v", uid, err)
 	}
 }
+
+// resetStuckStatuses чинит письма, застрявшие посреди дела, когда шлюз выключили или ноут уснул:
+// горутина, которая их вела, умерла вместе с процессом, и сами они из этих статусов не выйдут
+func resetStuckStatuses() {
+	fixes := []struct{ from, to string }{
+		{"drafting", "draft_failed"}, // черновик не дописался — можно нажать «Повторить»
+		{"sending", "draft_ready"},   // отправка оборвалась — можно нажать «Отправить» ещё раз
+	}
+
+	for _, f := range fixes {
+		res, err := db.Exec(`UPDATE emails SET status = ? WHERE status = ?`, f.to, f.from)
+		if err != nil {
+			log.Printf("⚠️ Не удалось сбросить %s: %v", f.from, err)
+			continue
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			log.Printf("🧹 Зависших писем %s → %s: %d (смотри /pending)", f.from, f.to, n)
+		}
+	}
+}

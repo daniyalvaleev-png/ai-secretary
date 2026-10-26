@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"html"
 	"io"
@@ -11,7 +10,6 @@ import (
 	"mime"
 	"mime/multipart"
 	"mime/quotedprintable"
-	"net/http"
 	"net/mail"
 	"os"
 	"regexp"
@@ -22,18 +20,6 @@ import (
 	"github.com/emersion/go-imap/client"
 	"github.com/joho/godotenv"
 )
-
-type OllamaRequest struct {
-	Model   string                 `json:"model"`
-	Prompt  string                 `json:"prompt"`
-	Format  string                 `json:"format"`
-	Stream  bool                   `json:"stream"`
-	Options map[string]interface{} `json:"options,omitempty"`
-}
-
-type OllamaResponse struct {
-	Response string `json:"response"`
-}
 
 type EmailDecision struct {
 	Sender               string `json:"отправитель"`
@@ -65,7 +51,7 @@ func loadConfig() Config {
 		Password:    os.Getenv("BOT_APP_PASSWORD"),
 		Addr:        fmt.Sprintf("%s:%s", os.Getenv("IMAP_SERVER"), os.Getenv("IMAP_PORT")),
 		OllamaURL:   getenvDefault("OLLAMA_URL", "http://localhost:11434"),
-		OllamaModel: getenvDefault("OLLAMA_MODEL", "secretary"),
+		OllamaModel: getenvDefault("OLLAMA_MODEL", "granite4.2:3b"),
 		TgToken:     os.Getenv("TELEGRAM_BOT_TOKEN"),
 		TgChatID:    os.Getenv("TELEGRAM_CHAT_ID"),
 		Interval:    interval,
@@ -90,6 +76,7 @@ func main() {
 		log.Fatalf("Не поднялась база %s: %v", dbFile, err)
 	}
 	defer db.Close()
+	resetStuckStatuses()
 	go startAPI(getenvDefault("API_ADDR", "127.0.0.1:8080"), os.Getenv("API_KEY"))
 
 	if cfg.TgToken != "" && cfg.TgChatID != "" {
@@ -416,62 +403,6 @@ func stripHTML(s string) string {
 	s = html.UnescapeString(s)
 	s = spacesRegex.ReplaceAllString(s, " ")
 	return strings.TrimSpace(s)
-}
-
-func askOllama(baseURL, model, prompt string) (EmailDecision, error) {
-	payload := OllamaRequest{
-		Model:  model,
-		Prompt: prompt,
-		Format: "json",
-		Stream: false,
-		Options: map[string]interface{}{
-			"temperature":    0.0,
-			"repeat_penalty": 1.2,
-		},
-	}
-
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return EmailDecision{}, err
-	}
-
-	req, err := http.NewRequest(http.MethodPost, baseURL+"/api/generate", bytes.NewBuffer(data))
-	if err != nil {
-		return EmailDecision{}, err
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	httpClient := &http.Client{
-		Timeout: 120 * time.Second,
-	}
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return EmailDecision{}, err
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return EmailDecision{}, err
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return EmailDecision{}, fmt.Errorf("Ollama вернул HTTP %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var ollamaResp OllamaResponse
-	if err := json.Unmarshal(respBody, &ollamaResp); err != nil {
-		return EmailDecision{}, err
-	}
-
-	var decision EmailDecision
-	if err := json.Unmarshal([]byte(ollamaResp.Response), &decision); err != nil {
-		return EmailDecision{}, fmt.Errorf("модель вернула невалидный JSON: %w; сырой ответ: %s", err, ollamaResp.Response)
-	}
-
-	return decision, nil
 }
 
 // newReplySender выбирает способ отправки по MAIL_SENDER из .env

@@ -20,6 +20,8 @@ llm = ChatOllama(
     model=os.getenv("DRAFT_MODEL", "granite4.2:3b"),
     base_url=os.getenv("OLLAMA_URL", "http://localhost:11434"),
     temperature=0.7,
+    keep_alive="30m",
+        reasoning=False,  # granite4.2 думает перед ответом — для коротких черновиков это лишние минуты
 )
 
 SYSTEM_PROMPT = """Ты пишешь ответ на письмо от имени владельца почты — от первого лица, как будто он сам отвечает.
@@ -32,6 +34,7 @@ SYSTEM_PROMPT = """Ты пишешь ответ на письмо от имен�
 - Если чего-то не хватает для ответа — коротко уточни.
 - Не цитируй грубости из письма.
 - Без темы, без подписи, без заготовок вроде [Имя].
+- Никогда не соглашайся от имени владельца на сделки, деньги и обязательства — ответь, что вернёшься с ответом позже.
 
 Выведи только текст ответа."""
 
@@ -70,7 +73,7 @@ def check_draft(state: DraftState) -> dict:
 
     if len(draft) < 10:
         problems.append("ответ пустой или слишком короткий")
-    if len(draft) > 1500:
+    if len(draft) > 500:
         problems.append("ответ слишком длинный")
 
     letters = [c for c in draft.lower() if c.isalpha()]
