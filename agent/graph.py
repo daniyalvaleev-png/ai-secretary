@@ -8,9 +8,10 @@ START -> write_draft -> check_draft -> есть проблемы и попытк
 import os
 from typing import TypedDict
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
 from langgraph.graph import END, START, StateGraph
+
 
 MAX_ATTEMPTS = 3
 
@@ -18,19 +19,29 @@ MAX_ATTEMPTS = 3
 llm = ChatOllama(
     model=os.getenv("DRAFT_MODEL", "granite4.2:3b"),
     base_url=os.getenv("OLLAMA_URL", "http://localhost:11434"),
-    temperature=0.3,
+    temperature=0.7,
 )
 
-SYSTEM_PROMPT = """Ты — ИИ-секретарь. Пишешь черновик ответа на входящее письмо от имени владельца почты.
+SYSTEM_PROMPT = """Ты пишешь ответ на письмо от имени владельца почты — от первого лица, как будто он сам отвечает.
 
 Правила:
-- Пиши только на русском языке.
-- Коротко: 2–5 предложений.
-- Вежливо и по делу. Не выдумывай факты, даты, суммы и обещания, которых нет в письме.
-- Если непонятно, чего хочет отправитель, — вежливо уточни.
-- Без темы письма, без подписи и без заготовок вроде [Имя] или [дата].
+- Только русский язык, простые живые фразы, как пишет обычный человек.
+- Коротко: 1–3 предложения.
+- Тон как у отправителя: если он на «ты» и пишет неформально — отвечай на «ты» и просто; если на «вы» — вежливо на «вы».
+- Используй только факты из письма. Не добавляй своих условий, времени, мест и обещаний.
+- Если чего-то не хватает для ответа — коротко уточни.
+- Не цитируй грубости из письма.
+- Без темы, без подписи, без заготовок вроде [Имя].
 
-Выведи только текст ответа, без пояснений."""
+Выведи только текст ответа."""
+
+# Few-shot: пара примеров «письмо → хороший ответ». Маленькие модели копируют стиль примеров лучше, чем следуют правилам
+EXAMPLES = [
+    HumanMessage("От: ivan@mail.ru\nТема: созвон\n\nздарова, го созвонимся завтра в 18?"),
+    AIMessage("Привет! Давай, завтра в 18 норм. Позвоню сам."),
+    HumanMessage("От: hr@company.ru\nТема: Собеседование\n\nЗдравствуйте! Приглашаем вас на собеседование в четверг. Удобно ли вам?"),
+    AIMessage("Здравствуйте! Спасибо за приглашение. В четверг удобно — подскажите, пожалуйста, время и формат встречи."),
+]
 
 
 class DraftState(TypedDict):
@@ -49,8 +60,8 @@ def write_draft(state: DraftState) -> dict:
     if state["problems"]:
         text += f"\n\nПрошлый черновик не подошёл: {state['problems']}. Напиши заново."
 
-    resp = llm.invoke([SystemMessage(SYSTEM_PROMPT), HumanMessage(text)])
-    return {"draft": resp.content.strip(), "attempts": state["attempts"] + 1}
+        resp = llm.invoke([SystemMessage(SYSTEM_PROMPT), *EXAMPLES, HumanMessage(text)])
+        return {"draft": resp.content.strip(), "attempts": state["attempts"] + 1}
 
 
 def check_draft(state: DraftState) -> dict:
