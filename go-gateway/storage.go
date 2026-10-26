@@ -7,11 +7,18 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
 
+// Жизнь письма:
+// pending → (Подтвердить) → drafting → draft_ready → (Отправить) → approved → [4c: sent]
+//
+//	↘ (Отклонить) → rejected     ↘ (Не отвечать) → skipped
+//
+// Если агент упал: drafting → draft_failed → (Повторить) → drafting
 type StoredEmail struct {
 	UID                  uint32    `json:"uid"`
 	From                 string    `json:"from"`
@@ -21,10 +28,14 @@ type StoredEmail struct {
 	Urgency              string    `json:"urgency"`
 	RequiresConfirmation bool      `json:"requires_confirmation"`
 	SuggestedAction      string    `json:"suggested_action"`
-	Status               string    `json:"status"` // pending, confirmed, rejected, done
+	Status               string    `json:"status"`
+	Draft                string    `json:"draft"`
 }
 
 const dbFile = "secretary.db"
+
+// Одна строка колонок на все запросы, порядок совпадает со scanEmail
+const emailColumns = `uid, from_addr, subject, body, received_at, urgency, requires_confirmation, suggested_action, status, draft`
 
 var db *sql.DB
 
@@ -61,6 +72,13 @@ func initDB() error {
 		if _, err := db.Exec(q); err != nil {
 			return fmt.Errorf("создание таблиц: %w", err)
 		}
+	}
+
+	// Миграция для базы, созданной до шага 4b: докидываем колонку draft.
+	// В SQLite нет "ADD COLUMN IF NOT EXISTS", поэтому просто глотаем ошибку "уже есть".
+	if _, err := db.Exec(`ALTER TABLE emails ADD COLUMN draft TEXT NOT NULL DEFAULT ''`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column") {
+		return fmt.Errorf("добавление колонки draft: %w", err)
 	}
 
 	return migrateFromJSON()
@@ -105,21 +123,24 @@ func saveEmail(e StoredEmail) {
 		e.Status = "pending"
 	}
 
-	_, err := db.Exec(`INSERT OR REPLACE INTO emails
-		(uid, from_addr, subject, body, received_at, urgency, requires_confirmation, suggested_action, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.UID, e.From, e.Subject, e.Body, e.ReceivedAt, e.Urgency, e.RequiresConfirmation, e.SuggestedAction, e.Status)
+	_, err := db.Exec(`INSERT OR REPLACE INTO emails (`+emailColumns+`)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.UID, e.From, e.Subject, e.Body, e.ReceivedAt, e.Urgency, e.RequiresConfirmation, e.SuggestedAction, e.Status, e.Draft)
 	if err != nil {
 		log.Printf("⚠️ Не удалось сохранить письмо UID %d: %v", e.UID, err)
 	}
 }
 
-func getEmail(uid uint32) (StoredEmail, bool) {
+// scanEmail подходит и для QueryRow, и для Rows — у обоих есть Scan
+func scanEmail(s interface{ Scan(...any) error }) (StoredEmail, error) {
 	var e StoredEmail
+	err := s.Scan(&e.UID, &e.From, &e.Subject, &e.Body, &e.ReceivedAt, &e.Urgency,
+		&e.RequiresConfirmation, &e.SuggestedAction, &e.Status, &e.Draft)
+	return e, err
+}
 
-	err := db.QueryRow(`SELECT uid, from_addr, subject, body, received_at, urgency, requires_confirmation, suggested_action, status
-		FROM emails WHERE uid = ?`, uid).
-		Scan(&e.UID, &e.From, &e.Subject, &e.Body, &e.ReceivedAt, &e.Urgency, &e.RequiresConfirmation, &e.SuggestedAction, &e.Status)
+func getEmail(uid uint32) (StoredEmail, bool) {
+	e, err := scanEmail(db.QueryRow(`SELECT `+emailColumns+` FROM emails WHERE uid = ?`, uid))
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
 			log.Printf("⚠️ Не удалось прочитать письмо UID %d: %v", uid, err)
@@ -132,7 +153,7 @@ func getEmail(uid uint32) (StoredEmail, bool) {
 
 // listEmails — последние письма, новые сверху. status == "" — все статусы.
 func listEmails(status string, limit int) ([]StoredEmail, error) {
-	rows, err := db.Query(`SELECT uid, from_addr, subject, body, received_at, urgency, requires_confirmation, suggested_action, status
+	rows, err := db.Query(`SELECT `+emailColumns+`
 		FROM emails
 		WHERE ? = '' OR status = ?
 		ORDER BY received_at DESC
@@ -145,8 +166,8 @@ func listEmails(status string, limit int) ([]StoredEmail, error) {
 	// Пустой срез, а не nil — чтобы в JSON был [], а не null
 	emails := []StoredEmail{}
 	for rows.Next() {
-		var e StoredEmail
-		if err := rows.Scan(&e.UID, &e.From, &e.Subject, &e.Body, &e.ReceivedAt, &e.Urgency, &e.RequiresConfirmation, &e.SuggestedAction, &e.Status); err != nil {
+		e, err := scanEmail(rows)
+		if err != nil {
 			return nil, err
 		}
 		emails = append(emails, e)
@@ -164,6 +185,32 @@ func updateEmailStatus(uid uint32, status string) bool {
 
 	n, _ := res.RowsAffected()
 	return n > 0
+}
+
+// transitionStatus меняет статус, только если сейчас он один из from.
+// Проверка и запись — один UPDATE, поэтому два быстрых нажатия кнопки не запустят дело дважды.
+func transitionStatus(uid uint32, to string, from ...string) bool {
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(from)), ",")
+
+	args := []any{to, uid}
+	for _, f := range from {
+		args = append(args, f)
+	}
+
+	res, err := db.Exec(`UPDATE emails SET status = ? WHERE uid = ? AND status IN (`+placeholders+`)`, args...)
+	if err != nil {
+		log.Printf("⚠️ Не удалось сменить статус UID %d: %v", uid, err)
+		return false
+	}
+
+	n, _ := res.RowsAffected()
+	return n > 0
+}
+
+func saveDraft(uid uint32, draft string) {
+	if _, err := db.Exec(`UPDATE emails SET draft = ?, status = 'draft_ready' WHERE uid = ?`, draft, uid); err != nil {
+		log.Printf("⚠️ Не удалось сохранить черновик UID %d: %v", uid, err)
+	}
 }
 
 func isProcessed(uid uint32) bool {

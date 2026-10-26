@@ -10,10 +10,16 @@ import (
 )
 
 var allowedStatuses = map[string]bool{
-	"pending":   true,
-	"confirmed": true,
-	"rejected":  true,
-	"done":      true,
+	"pending":      true,
+	"confirmed":    true, // старый статус, остался у писем до шага 4b
+	"rejected":     true,
+	"done":         true,
+	"drafting":     true,
+	"draft_ready":  true,
+	"draft_failed": true,
+	"approved":     true,
+	"skipped":      true,
+	"sent":         true,
 }
 
 // startAPI поднимает HTTP API. Блокирует, поэтому запускаем в горутине.

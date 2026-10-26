@@ -136,7 +136,7 @@ type tgUpdate struct {
 }
 
 // runTelegramBot крутится в отдельной горутине и ловит нажатия кнопок (long polling)
-func runTelegramBot(token, chatID string) {
+func runTelegramBot(token, chatID, agentURL string) {
 	log.Println("🤖 Telegram-бот слушает кнопки")
 
 	var offset int64
@@ -157,7 +157,7 @@ func runTelegramBot(token, chatID string) {
 			// offset = последний update_id + 1, иначе Telegram будет слать те же нажатия снова
 			offset = u.UpdateID + 1
 			if u.CallbackQuery != nil {
-				handleCallback(token, chatID, u.CallbackQuery)
+				handleCallback(token, chatID, agentURL, u.CallbackQuery)
 			}
 		}
 	}
@@ -171,8 +171,34 @@ func answerCallback(token, callbackID, text string) {
 		log.Printf("⚠️ answerCallbackQuery: %v", err)
 	}
 }
+func button(text, action string, uid uint32) map[string]string {
+	return map[string]string{
+		"text":          text,
+		"callback_data": action + ":" + strconv.FormatUint(uint64(uid), 10),
+	}
+}
 
-func handleCallback(token, chatID string, cb *tgCallback) {
+func sendWithKeyboard(token, chatID, text string, rows [][]map[string]string) error {
+	return tgCall(token, "sendMessage", map[string]any{
+		"chat_id":                  chatIDValue(chatID),
+		"text":                     text,
+		"disable_web_page_preview": true,
+		"reply_markup":             map[string]any{"inline_keyboard": rows},
+	}, nil)
+}
+
+// editMessage дописывает строку к сообщению с кнопкой и убирает кнопки (нет reply_markup)
+func editMessage(token string, cb *tgCallback, suffix string) {
+	if err := tgCall(token, "editMessageText", map[string]any{
+		"chat_id":    cb.Message.Chat.ID,
+		"message_id": cb.Message.MessageID,
+		"text":       cb.Message.Text + "\n\n" + suffix,
+	}, nil); err != nil {
+		log.Printf("⚠️ editMessageText: %v", err)
+	}
+}
+
+func handleCallback(token, chatID, agentURL string, cb *tgCallback) {
 	if cb.Message == nil {
 		answerCallback(token, cb.ID, "Сообщение слишком старое")
 		return
@@ -198,30 +224,54 @@ func handleCallback(token, chatID string, cb *tgCallback) {
 		return
 	}
 
+	// Каждая кнопка работает только из своих статусов. Не тот статус — значит, уже нажимали.
 	switch action {
-	case "confirm", "reject":
-		if e.Status != "pending" {
+	case "confirm":
+		if !transitionStatus(uid, "drafting", "pending") {
 			answerCallback(token, cb.ID, "Уже обработано: "+e.Status)
 			return
 		}
+		answerCallback(token, cb.ID, "✅ Пишу черновик…")
+		editMessage(token, cb, "✅ Подтверждено — пишу черновик…")
+		log.Printf("👆 UID %d → drafting", uid)
+		go draftAndSend(token, chatID, agentURL, e)
 
-		status, label := "confirmed", "✅ Подтверждено"
-		if action == "reject" {
-			status, label = "rejected", "❌ Отклонено"
+	case "reject":
+		if !transitionStatus(uid, "rejected", "pending") {
+			answerCallback(token, cb.ID, "Уже обработано: "+e.Status)
+			return
 		}
+		answerCallback(token, cb.ID, "❌ Отклонено")
+		editMessage(token, cb, "❌ Отклонено")
+		log.Printf("👆 UID %d → rejected", uid)
 
-		updateEmailStatus(uid, status)
-		answerCallback(token, cb.ID, label)
-		log.Printf("👆 UID %d → %s", uid, status)
-
-		// Переписываем сообщение без reply_markup — кнопки пропадают
-		if err := tgCall(token, "editMessageText", map[string]any{
-			"chat_id":    cb.Message.Chat.ID,
-			"message_id": cb.Message.MessageID,
-			"text":       cb.Message.Text + "\n\n" + label,
-		}, nil); err != nil {
-			log.Printf("⚠️ editMessageText: %v", err)
+	case "redraft":
+		if !transitionStatus(uid, "drafting", "draft_ready", "draft_failed") {
+			answerCallback(token, cb.ID, "Сейчас нельзя: "+e.Status)
+			return
 		}
+		answerCallback(token, cb.ID, "🔄 Переписываю…")
+		editMessage(token, cb, "🔄 Переписываю…")
+		log.Printf("👆 UID %d → drafting (заново)", uid)
+		go draftAndSend(token, chatID, agentURL, e)
+
+	case "send":
+		if !transitionStatus(uid, "approved", "draft_ready") {
+			answerCallback(token, cb.ID, "Сейчас нельзя: "+e.Status)
+			return
+		}
+		answerCallback(token, cb.ID, "📤 Одобрено")
+		editMessage(token, cb, "📤 Одобрено. Реальная отправка появится на шаге 4c")
+		log.Printf("👆 UID %d → approved", uid)
+
+	case "skip":
+		if !transitionStatus(uid, "skipped", "draft_ready", "draft_failed") {
+			answerCallback(token, cb.ID, "Сейчас нельзя: "+e.Status)
+			return
+		}
+		answerCallback(token, cb.ID, "🙅 Не отвечаем")
+		editMessage(token, cb, "🙅 Не отвечаем")
+		log.Printf("👆 UID %d → skipped", uid)
 
 	case "show":
 		answerCallback(token, cb.ID, "")
@@ -235,5 +285,38 @@ func handleCallback(token, chatID string, cb *tgCallback) {
 
 	default:
 		answerCallback(token, cb.ID, "Неизвестная кнопка")
+	}
+}
+
+// draftAndSend крутится в своей горутине: агент думает до минуты,
+// а бот в это время должен дальше ловить другие кнопки
+func draftAndSend(token, chatID, agentURL string, e StoredEmail) {
+	resp, err := requestDraft(agentURL, e)
+	if err != nil {
+		log.Printf("❌ Черновик для UID %d: %v", e.UID, err)
+		updateEmailStatus(e.UID, "draft_failed")
+
+		text := fmt.Sprintf("⚠️ Не получилось написать черновик для «%s»:\n%v", e.Subject, err)
+		if err := sendWithKeyboard(token, chatID, text, [][]map[string]string{
+			{button("🔄 Повторить", "redraft", e.UID), button("🙅 Не отвечать", "skip", e.UID)},
+		}); err != nil {
+			log.Printf("⚠️ Telegram: %v", err)
+		}
+		return
+	}
+
+	saveDraft(e.UID, resp.Draft)
+	log.Printf("✍️ Черновик для UID %d готов (попыток: %d)", e.UID, resp.Attempts)
+
+	text := fmt.Sprintf("✍️ Черновик ответа\nКому: %s\nТема: Re: %s\n\n%s", e.From, e.Subject, resp.Draft)
+	if resp.Problems != "" {
+		text += "\n\n⚠️ Агент так и не справился: " + resp.Problems
+	}
+
+	if err := sendWithKeyboard(token, chatID, text, [][]map[string]string{
+		{button("📤 Отправить", "send", e.UID), button("🔄 Переписать", "redraft", e.UID)},
+		{button("🙅 Не отвечать", "skip", e.UID)},
+	}); err != nil {
+		log.Printf("⚠️ Не удалось отправить черновик в Telegram: %v", err)
 	}
 }
