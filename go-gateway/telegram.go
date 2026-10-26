@@ -136,7 +136,7 @@ type tgUpdate struct {
 }
 
 // runTelegramBot крутится в отдельной горутине и ловит нажатия кнопок (long polling)
-func runTelegramBot(token, chatID, agentURL string) {
+func runTelegramBot(token, chatID, agentURL string, mailer Mailer) {
 	log.Println("🤖 Telegram-бот слушает кнопки")
 
 	var offset int64
@@ -157,7 +157,7 @@ func runTelegramBot(token, chatID, agentURL string) {
 			// offset = последний update_id + 1, иначе Telegram будет слать те же нажатия снова
 			offset = u.UpdateID + 1
 			if u.CallbackQuery != nil {
-				handleCallback(token, chatID, agentURL, u.CallbackQuery)
+				handleCallback(token, chatID, agentURL, mailer, u.CallbackQuery)
 			}
 		}
 	}
@@ -198,7 +198,7 @@ func editMessage(token string, cb *tgCallback, suffix string) {
 	}
 }
 
-func handleCallback(token, chatID, agentURL string, cb *tgCallback) {
+func handleCallback(token, chatID, agentURL string, mailer Mailer, cb *tgCallback) {
 	if cb.Message == nil {
 		answerCallback(token, cb.ID, "Сообщение слишком старое")
 		return
@@ -256,13 +256,14 @@ func handleCallback(token, chatID, agentURL string, cb *tgCallback) {
 		go draftAndSend(token, chatID, agentURL, e)
 
 	case "send":
-		if !transitionStatus(uid, "approved", "draft_ready") {
+		if !transitionStatus(uid, "sending", "draft_ready") {
 			answerCallback(token, cb.ID, "Сейчас нельзя: "+e.Status)
 			return
 		}
-		answerCallback(token, cb.ID, "📤 Одобрено")
-		editMessage(token, cb, "📤 Одобрено. Реальная отправка появится на шаге 4c")
-		log.Printf("👆 UID %d → approved", uid)
+		answerCallback(token, cb.ID, "📤 Отправляю…")
+		editMessage(token, cb, "📤 Отправляю…")
+		log.Printf("👆 UID %d → sending", uid)
+		go sendAndReport(token, chatID, mailer, e)
 
 	case "skip":
 		if !transitionStatus(uid, "skipped", "draft_ready", "draft_failed") {
@@ -318,5 +319,30 @@ func draftAndSend(token, chatID, agentURL string, e StoredEmail) {
 		{button("🙅 Не отвечать", "skip", e.UID)},
 	}); err != nil {
 		log.Printf("⚠️ Не удалось отправить черновик в Telegram: %v", err)
+	}
+}
+
+// sendAndReport отправляет ответ по SMTP в своей горутине и пишет в Telegram, чем кончилось
+func sendAndReport(token, chatID string, mailer Mailer, e StoredEmail) {
+	if err := mailer.SendReply(e); err != nil {
+		log.Printf("❌ Отправка UID %d: %v", e.UID, err)
+
+		// Откатываем в draft_ready, чтобы можно было нажать «Отправить» ещё раз
+		transitionStatus(e.UID, "draft_ready", "sending")
+
+		text := fmt.Sprintf("⚠️ Не удалось отправить ответ на «%s»:\n%v", e.Subject, err)
+		if err := sendWithKeyboard(token, chatID, text, [][]map[string]string{
+			{button("📤 Попробовать ещё", "send", e.UID), button("🙅 Не отвечать", "skip", e.UID)},
+		}); err != nil {
+			log.Printf("⚠️ Telegram: %v", err)
+		}
+		return
+	}
+
+	transitionStatus(e.UID, "sent", "sending")
+	log.Printf("📤 UID %d: ответ отправлен на %s", e.UID, e.From)
+
+	if err := sendTelegramMessage(token, chatID, fmt.Sprintf("✅ Ответ на «%s» отправлен → %s", e.Subject, e.From)); err != nil {
+		log.Printf("⚠️ Telegram: %v", err)
 	}
 }

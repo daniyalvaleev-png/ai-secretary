@@ -20,6 +20,7 @@ var allowedStatuses = map[string]bool{
 	"approved":     true,
 	"skipped":      true,
 	"sent":         true,
+	"sending":      true,
 }
 
 // startAPI поднимает HTTP API. Блокирует, поэтому запускаем в горутине.

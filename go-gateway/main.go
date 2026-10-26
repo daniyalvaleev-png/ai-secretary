@@ -86,7 +86,13 @@ func main() {
 	go startAPI(getenvDefault("API_ADDR", "127.0.0.1:8080"), os.Getenv("API_KEY"))
 
 	if cfg.TgToken != "" && cfg.TgChatID != "" {
-		go runTelegramBot(cfg.TgToken, cfg.TgChatID, getenvDefault("AGENT_URL", "http://127.0.0.1:8090"))
+		mailer := Mailer{
+			Host:     getenvDefault("SMTP_SERVER", "smtp.gmail.com"),
+			Port:     getenvDefault("SMTP_PORT", "587"),
+			User:     cfg.Email,
+			Password: cfg.Password,
+		}
+		go runTelegramBot(cfg.TgToken, cfg.TgChatID, getenvDefault("AGENT_URL", "http://127.0.0.1:8090"), mailer)
 	}
 
 	log.Printf("🚀 Шлюз запущен, проверяю почту каждые %s (Ctrl+C — стоп)", cfg.Interval)
