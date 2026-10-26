@@ -26,6 +26,8 @@ type EmailDecision struct {
 	Urgency              string `json:"срочность"`
 	RequiresConfirmation bool   `json:"требуется_подтверждение"`
 	SuggestedAction      string `json:"предлагаемое_действие"`
+	Suspicious           bool   `json:"-"`
+	SuspicionReason      string `json:"-"` // заполняет код по результату проверки на мошенничество
 }
 
 type Config struct {
@@ -210,18 +212,7 @@ func processMessage(c *client.Client, cfg Config, msg *imap.Message) {
 
 	text := truncate(extractPlainText(raw), 4000)
 
-	prompt := fmt.Sprintf(`Проанализируй входящее письмо для ИИ-секретаря.
-
-Отправитель: %s
-Тема: %s
-Тело письма:
-%s
-
-Верни строго JSON по схеме:
-{"отправитель":"string","срочность":"высокая/средняя/низкая","требуется_подтверждение":true,"предлагаемое_действие":"string"}`,
-		from, subject, text)
-
-	decision, err := askOllama(cfg.OllamaURL, cfg.OllamaModel, prompt)
+	decision, err := analyzeEmail(cfg.OllamaURL, cfg.OllamaModel, from, subject, text)
 	if err != nil {
 		log.Printf("❌ Ошибка Ollama для UID %d: %v", msg.Uid, err)
 		return // не помечаем — попробуем на следующем круге
@@ -231,6 +222,9 @@ func processMessage(c *client.Client, cfg Config, msg *imap.Message) {
 	fmt.Printf("🆔 UID: %d\n👤 От: %s\n📌 Тема: %s\n", msg.Uid, from, subject)
 	fmt.Printf("🧠 Срочность: %s\n❓ Подтверждение: %t\n⚙️ Действие: %s\n",
 		decision.Urgency, decision.RequiresConfirmation, decision.SuggestedAction)
+	if decision.Suspicious {
+		fmt.Printf("🚨 Подозрительное: %s\n", decision.SuspicionReason)
+	}
 
 	saveEmail(StoredEmail{
 		UID:                  msg.Uid,
@@ -241,6 +235,8 @@ func processMessage(c *client.Client, cfg Config, msg *imap.Message) {
 		Urgency:              decision.Urgency,
 		RequiresConfirmation: decision.RequiresConfirmation,
 		SuggestedAction:      decision.SuggestedAction,
+		Suspicious:           decision.Suspicious,
+		SuspicionReason:      decision.SuspicionReason,
 		Status:               "pending",
 	})
 

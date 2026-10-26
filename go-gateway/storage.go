@@ -30,12 +30,14 @@ type StoredEmail struct {
 	SuggestedAction      string    `json:"suggested_action"`
 	Status               string    `json:"status"`
 	Draft                string    `json:"draft"`
+	Suspicious           bool      `json:"suspicious"`
+	SuspicionReason      string    `json:"suspicion_reason"`
 }
 
 const dbFile = "secretary.db"
 
 // Одна строка колонок на все запросы, порядок совпадает со scanEmail
-const emailColumns = `uid, from_addr, subject, body, received_at, urgency, requires_confirmation, suggested_action, status, draft`
+const emailColumns = `uid, from_addr, subject, body, received_at, urgency, requires_confirmation, suggested_action, status, draft, suspicious, suspicion_reason`
 
 var db *sql.DB
 
@@ -74,11 +76,17 @@ func initDB() error {
 		}
 	}
 
-	// Миграция для базы, созданной до шага 4b: докидываем колонку draft.
+	// Миграции для базы, созданной раньше: докидываем новые колонки.
 	// В SQLite нет "ADD COLUMN IF NOT EXISTS", поэтому просто глотаем ошибку "уже есть".
-	if _, err := db.Exec(`ALTER TABLE emails ADD COLUMN draft TEXT NOT NULL DEFAULT ''`); err != nil &&
-		!strings.Contains(err.Error(), "duplicate column") {
-		return fmt.Errorf("добавление колонки draft: %w", err)
+	migrations := []string{
+		`ALTER TABLE emails ADD COLUMN draft TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE emails ADD COLUMN suspicious INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE emails ADD COLUMN suspicion_reason TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, q := range migrations {
+		if _, err := db.Exec(q); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("миграция %q: %w", q, err)
+		}
 	}
 
 	return migrateFromJSON()
@@ -124,8 +132,8 @@ func saveEmail(e StoredEmail) {
 	}
 
 	_, err := db.Exec(`INSERT OR REPLACE INTO emails (`+emailColumns+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.UID, e.From, e.Subject, e.Body, e.ReceivedAt, e.Urgency, e.RequiresConfirmation, e.SuggestedAction, e.Status, e.Draft)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? )`,
+		e.UID, e.From, e.Subject, e.Body, e.ReceivedAt, e.Urgency, e.RequiresConfirmation, e.SuggestedAction, e.Status, e.Draft, e.Suspicious, e.SuspicionReason)
 	if err != nil {
 		log.Printf("⚠️ Не удалось сохранить письмо UID %d: %v", e.UID, err)
 	}
@@ -135,7 +143,7 @@ func saveEmail(e StoredEmail) {
 func scanEmail(s interface{ Scan(...any) error }) (StoredEmail, error) {
 	var e StoredEmail
 	err := s.Scan(&e.UID, &e.From, &e.Subject, &e.Body, &e.ReceivedAt, &e.Urgency,
-		&e.RequiresConfirmation, &e.SuggestedAction, &e.Status, &e.Draft)
+		&e.RequiresConfirmation, &e.SuggestedAction, &e.Status, &e.Draft, &e.Suspicious, &e.SuspicionReason)
 	return e, err
 }
 

@@ -17,7 +17,9 @@ var tgHTTP = &http.Client{Timeout: 40 * time.Second}
 func shouldSendTelegramAlert(d EmailDecision) bool {
 	urgency := strings.ToLower(strings.TrimSpace(d.Urgency))
 
-	return d.RequiresConfirmation ||
+	// Подозрительное шлём всегда — пусть владелец знает, что его пытались развести
+	return d.Suspicious ||
+		d.RequiresConfirmation ||
 		urgency == "высокая" ||
 		urgency == "high" ||
 		urgency == "срочно"
@@ -25,6 +27,11 @@ func shouldSendTelegramAlert(d EmailDecision) bool {
 
 func buildTelegramAlert(from, subject string, d EmailDecision) string {
 	var b strings.Builder
+
+	if d.Suspicious {
+		b.WriteString("🚨 ПОХОЖЕ НА МОШЕННИЧЕСТВО: " + d.SuspicionReason + "\n")
+		b.WriteString("Не переходи по ссылкам и ничего не отправляй, пока не проверишь.\n\n")
+	}
 
 	b.WriteString("📩 Новое письмо для ИИ-секретаря\n\n")
 	b.WriteString("От: " + from + "\n")
@@ -418,7 +425,7 @@ func sendPendingList(token, chatID string) {
 			var err error
 			switch status {
 			case "pending":
-				d := EmailDecision{Urgency: e.Urgency, RequiresConfirmation: e.RequiresConfirmation, SuggestedAction: e.SuggestedAction}
+				d := EmailDecision{Urgency: e.Urgency, RequiresConfirmation: e.RequiresConfirmation, SuggestedAction: e.SuggestedAction, Suspicious: e.Suspicious, SuspicionReason: e.SuspicionReason}
 				err = sendEmailAlert(token, chatID, e.UID, buildTelegramAlert(e.From, e.Subject, d))
 			case "draft_failed":
 				err = sendDraftFailed(token, chatID, e, "черновик так и не дописался")
