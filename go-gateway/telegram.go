@@ -136,7 +136,7 @@ type tgUpdate struct {
 }
 
 // runTelegramBot крутится в отдельной горутине и ловит нажатия кнопок (long polling)
-func runTelegramBot(token, chatID, agentURL string, mailer Mailer) {
+func runTelegramBot(token, chatID, agentURL string, mailer ReplySender) {
 	log.Println("🤖 Telegram-бот слушает кнопки")
 
 	var offset int64
@@ -198,7 +198,7 @@ func editMessage(token string, cb *tgCallback, suffix string) {
 	}
 }
 
-func handleCallback(token, chatID, agentURL string, mailer Mailer, cb *tgCallback) {
+func handleCallback(token, chatID, agentURL string, mailer ReplySender, cb *tgCallback) {
 	if cb.Message == nil {
 		answerCallback(token, cb.ID, "Сообщение слишком старое")
 		return
@@ -323,7 +323,7 @@ func draftAndSend(token, chatID, agentURL string, e StoredEmail) {
 }
 
 // sendAndReport отправляет ответ по SMTP в своей горутине и пишет в Telegram, чем кончилось
-func sendAndReport(token, chatID string, mailer Mailer, e StoredEmail) {
+func sendAndReport(token, chatID string, mailer ReplySender, e StoredEmail) {
 	if err := mailer.SendReply(e); err != nil {
 		log.Printf("❌ Отправка UID %d: %v", e.UID, err)
 

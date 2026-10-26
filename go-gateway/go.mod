@@ -5,9 +5,12 @@ go 1.27.0
 require (
 	github.com/emersion/go-imap v1.2.1
 	github.com/joho/godotenv v1.5.1
+	golang.org/x/oauth2 v0.37.0
+	modernc.org/sqlite v1.61.0
 )
 
 require (
+	cloud.google.com/go/compute/metadata v0.3.0 // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/emersion/go-sasl v0.0.0-20200509203442-7bfe0ed36a21 // indirect
 	github.com/google/uuid v1.6.0 // indirect
@@ -19,5 +22,4 @@ require (
 	modernc.org/libc v1.79.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
-	modernc.org/sqlite v1.61.0 // indirect
 )

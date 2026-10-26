@@ -11,6 +11,12 @@ import (
 	"time"
 )
 
+// ReplySender — всё, что умеет отправить ответ на письмо.
+// Телеграм-бот знает только про этот интерфейс, поэтому SMTP и Gmail API подменяются через .env
+type ReplySender interface {
+	SendReply(e StoredEmail) error
+}
+
 // Mailer отправляет письма через SMTP с ящика бота (тот же app password, что и для IMAP)
 type Mailer struct {
 	Host     string
@@ -25,14 +31,28 @@ func (m Mailer) SendReply(e StoredEmail) error {
 		return fmt.Errorf("не заданы BOT_EMAIL / BOT_APP_PASSWORD")
 	}
 
+	to, msg, err := composeReply(m.User, e)
+	if err != nil {
+		return err
+	}
+
+	// PlainAuth сам откажется слать пароль по незашифрованному каналу (кроме localhost),
+	// а SendMail включает STARTTLS, если сервер его поддерживает (Gmail на 587 — поддерживает)
+	auth := smtp.PlainAuth("", m.User, m.Password, m.Host)
+
+	return smtp.SendMail(net.JoinHostPort(m.Host, m.Port), auth, m.User, []string{to}, msg)
+}
+
+// composeReply проверяет черновик и собирает готовое письмо-ответ. Общее для SMTP и Gmail API.
+func composeReply(from string, e StoredEmail) (to string, msg []byte, err error) {
 	if strings.TrimSpace(e.Draft) == "" {
-		return fmt.Errorf("черновик пустой")
+		return "", nil, fmt.Errorf("черновик пустой")
 	}
 
 	// ParseAddress заодно отсекает мусор вместо адреса
-	to, err := mail.ParseAddress(e.From)
+	addr, err := mail.ParseAddress(e.From)
 	if err != nil {
-		return fmt.Errorf("кривой адрес получателя %q: %w", e.From, err)
+		return "", nil, fmt.Errorf("кривой адрес получателя %q: %w", e.From, err)
 	}
 
 	subject := e.Subject
@@ -40,13 +60,7 @@ func (m Mailer) SendReply(e StoredEmail) error {
 		subject = "Re: " + subject
 	}
 
-	msg := buildMessage(m.User, to.Address, subject, e.Draft)
-
-	// PlainAuth сам откажется слать пароль по незашифрованному каналу (кроме localhost),
-	// а SendMail включает STARTTLS, если сервер его поддерживает (Gmail на 587 — поддерживает)
-	auth := smtp.PlainAuth("", m.User, m.Password, m.Host)
-
-	return smtp.SendMail(net.JoinHostPort(m.Host, m.Port), auth, m.User, []string{to.Address}, msg)
+	return addr.Address, buildMessage(from, addr.Address, subject, e.Draft), nil
 }
 
 // buildMessage собирает письмо руками: заголовки + пустая строка + тело в base64

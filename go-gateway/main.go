@@ -73,6 +73,13 @@ func loadConfig() Config {
 }
 
 func main() {
+	// Разовая команда: go run . gmail-auth — вход ботом в Google и сохранение token.json
+	if len(os.Args) > 1 && os.Args[1] == "gmail-auth" {
+		if err := runGmailAuth(); err != nil {
+			log.Fatalf("❌ %v", err)
+		}
+		return
+	}
 	if err := godotenv.Load(); err != nil {
 		log.Fatal("Ошибка загрузки .env файла. Убедись, что он лежит в той же папке")
 	}
@@ -86,11 +93,9 @@ func main() {
 	go startAPI(getenvDefault("API_ADDR", "127.0.0.1:8080"), os.Getenv("API_KEY"))
 
 	if cfg.TgToken != "" && cfg.TgChatID != "" {
-		mailer := Mailer{
-			Host:     getenvDefault("SMTP_SERVER", "smtp.gmail.com"),
-			Port:     getenvDefault("SMTP_PORT", "587"),
-			User:     cfg.Email,
-			Password: cfg.Password,
+		mailer, err := newReplySender(cfg)
+		if err != nil {
+			log.Fatalf("❌ Отправка почты не настроена: %v", err)
 		}
 		go runTelegramBot(cfg.TgToken, cfg.TgChatID, getenvDefault("AGENT_URL", "http://127.0.0.1:8090"), mailer)
 	}
@@ -467,4 +472,29 @@ func askOllama(baseURL, model, prompt string) (EmailDecision, error) {
 	}
 
 	return decision, nil
+}
+
+// newReplySender выбирает способ отправки по MAIL_SENDER из .env
+func newReplySender(cfg Config) (ReplySender, error) {
+	switch mode := getenvDefault("MAIL_SENDER", "smtp"); mode {
+	case "gmail_api":
+		sender, err := newGmailAPISender(cfg.Email)
+		if err != nil {
+			return nil, err
+		}
+		log.Println("📮 Почту отправляю через Gmail API")
+		return sender, nil
+
+	case "smtp":
+		log.Println("📮 Почту отправляю через SMTP")
+		return Mailer{
+			Host:     getenvDefault("SMTP_SERVER", "smtp.gmail.com"),
+			Port:     getenvDefault("SMTP_PORT", "587"),
+			User:     cfg.Email,
+			Password: cfg.Password,
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("MAIL_SENDER=%q, а надо smtp или gmail_api", mode)
+	}
 }
