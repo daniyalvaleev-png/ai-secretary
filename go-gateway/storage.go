@@ -32,12 +32,17 @@ type StoredEmail struct {
 	Draft                string    `json:"draft"`
 	Suspicious           bool      `json:"suspicious"`
 	SuspicionReason      string    `json:"suspicion_reason"`
+	MeetingTitle         string    `json:"meeting_title"` // встреча, которую агент нашёл в письме
+	MeetingStart         string    `json:"meeting_start"` // «2026-10-28 13:59», пусто — встречи нет
+	MeetingEnd           string    `json:"meeting_end"`
+	CalendarNote         string    `json:"calendar_note"`     // что агент узнал из календаря
+	CalendarEventID      string    `json:"calendar_event_id"` // id события после «В календарь»; "adding" — создаётся прямо сейчас
 }
 
 const dbFile = "secretary.db"
 
 // Одна строка колонок на все запросы, порядок совпадает со scanEmail
-const emailColumns = `uid, from_addr, subject, body, received_at, urgency, requires_confirmation, suggested_action, status, draft, suspicious, suspicion_reason`
+const emailColumns = `uid, from_addr, subject, body, received_at, urgency, requires_confirmation, suggested_action, status, draft, suspicious, suspicion_reason, meeting_title, meeting_start, meeting_end, calendar_note, calendar_event_id`
 
 var db *sql.DB
 
@@ -82,6 +87,11 @@ func initDB() error {
 		`ALTER TABLE emails ADD COLUMN draft TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE emails ADD COLUMN suspicious INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE emails ADD COLUMN suspicion_reason TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE emails ADD COLUMN meeting_title TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE emails ADD COLUMN meeting_start TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE emails ADD COLUMN meeting_end TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE emails ADD COLUMN calendar_note TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE emails ADD COLUMN calendar_event_id TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, q := range migrations {
 		if _, err := db.Exec(q); err != nil && !strings.Contains(err.Error(), "duplicate column") {
@@ -131,20 +141,28 @@ func saveEmail(e StoredEmail) {
 		e.Status = "pending"
 	}
 
-	_, err := db.Exec(`INSERT OR REPLACE INTO emails (`+emailColumns+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? )`,
-		e.UID, e.From, e.Subject, e.Body, e.ReceivedAt, e.Urgency, e.RequiresConfirmation, e.SuggestedAction, e.Status, e.Draft, e.Suspicious, e.SuspicionReason)
+	_, err := db.Exec(`INSERT OR REPLACE INTO emails (`+emailColumns+`) VALUES (`+placeholders(emailColumns)+`)`,
+		e.UID, e.From, e.Subject, e.Body, e.ReceivedAt, e.Urgency, e.RequiresConfirmation, e.SuggestedAction, e.Status, e.Draft,
+		e.Suspicious, e.SuspicionReason, e.MeetingTitle, e.MeetingStart, e.MeetingEnd, e.CalendarNote, e.CalendarEventID)
 	if err != nil {
 		log.Printf("⚠️ Не удалось сохранить письмо UID %d: %v", e.UID, err)
 	}
 }
 
 // scanEmail подходит и для QueryRow, и для Rows — у обоих есть Scan
+// scanEmail подходит и для QueryRow, и для Rows — у обоих есть Scan
 func scanEmail(s interface{ Scan(...any) error }) (StoredEmail, error) {
 	var e StoredEmail
 	err := s.Scan(&e.UID, &e.From, &e.Subject, &e.Body, &e.ReceivedAt, &e.Urgency,
-		&e.RequiresConfirmation, &e.SuggestedAction, &e.Status, &e.Draft, &e.Suspicious, &e.SuspicionReason)
+		&e.RequiresConfirmation, &e.SuggestedAction, &e.Status, &e.Draft, &e.Suspicious, &e.SuspicionReason,
+		&e.MeetingTitle, &e.MeetingStart, &e.MeetingEnd, &e.CalendarNote, &e.CalendarEventID)
 	return e, err
+}
+
+// placeholders("a, b, c") → "?, ?, ?" — чтобы не пересчитывать знаки вопроса руками при каждой новой колонке
+func placeholders(columns string) string {
+	n := strings.Count(columns, ",") + 1
+	return strings.TrimSuffix(strings.Repeat("?, ", n), ", ")
 }
 
 func getEmail(uid uint32) (StoredEmail, bool) {
@@ -215,9 +233,34 @@ func transitionStatus(uid uint32, to string, from ...string) bool {
 	return n > 0
 }
 
-func saveDraft(uid uint32, draft string) {
-	if _, err := db.Exec(`UPDATE emails SET draft = ?, status = 'draft_ready' WHERE uid = ?`, draft, uid); err != nil {
+func saveDraft(uid uint32, resp draftResponse) {
+	var m draftMeeting
+	if resp.Meeting != nil {
+		m = *resp.Meeting
+	}
+
+	if _, err := db.Exec(`UPDATE emails SET draft = ?, status = 'draft_ready',
+		meeting_title = ?, meeting_start = ?, meeting_end = ?, calendar_note = ? WHERE uid = ?`,
+		resp.Draft, m.Title, m.Start, m.End, resp.CalendarNote, uid); err != nil {
 		log.Printf("⚠️ Не удалось сохранить черновик UID %d: %v", uid, err)
+	}
+}
+
+// claimCalendarAdd помечает «событие создаётся» одним UPDATE: два быстрых нажатия «В календарь»
+// не создадут два события — второе нажатие увидит, что id уже не пустой.
+func claimCalendarAdd(uid uint32) bool {
+	res, err := db.Exec(`UPDATE emails SET calendar_event_id = 'adding' WHERE uid = ? AND calendar_event_id = '' AND meeting_start != ''`, uid)
+	if err != nil {
+		log.Printf("⚠️ claimCalendarAdd UID %d: %v", uid, err)
+		return false
+	}
+	n, _ := res.RowsAffected()
+	return n > 0
+}
+
+func setCalendarEventID(uid uint32, id string) {
+	if _, err := db.Exec(`UPDATE emails SET calendar_event_id = ? WHERE uid = ?`, id, uid); err != nil {
+		log.Printf("⚠️ setCalendarEventID UID %d: %v", uid, err)
 	}
 }
 
@@ -250,5 +293,9 @@ func resetStuckStatuses() {
 		if n, _ := res.RowsAffected(); n > 0 {
 			log.Printf("🧹 Зависших писем %s → %s: %d (смотри /pending)", f.from, f.to, n)
 		}
+	}
+	// «В календарь» оборвалось на середине — отпускаем, чтобы кнопку можно было нажать снова
+	if _, err := db.Exec(`UPDATE emails SET calendar_event_id = '' WHERE calendar_event_id = 'adding'`); err != nil {
+		log.Printf("⚠️ Не удалось сбросить зависшие добавления в календарь: %v", err)
 	}
 }

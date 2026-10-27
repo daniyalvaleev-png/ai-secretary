@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -144,7 +145,7 @@ type tgUpdate struct {
 }
 
 // runTelegramBot крутится в отдельной горутине и ловит нажатия кнопок (long polling)
-func runTelegramBot(token, chatID, agentURL string, mailer ReplySender) {
+func runTelegramBot(token, chatID, agentURL string, mailer ReplySender, cal *CalendarClient) {
 	log.Println("🤖 Telegram-бот слушает кнопки")
 	setBotCommands(token)
 
@@ -166,7 +167,7 @@ func runTelegramBot(token, chatID, agentURL string, mailer ReplySender) {
 			// offset = последний update_id + 1, иначе Telegram будет слать те же нажатия снова
 			offset = u.UpdateID + 1
 			if u.CallbackQuery != nil {
-				handleCallback(token, chatID, agentURL, mailer, u.CallbackQuery)
+				handleCallback(token, chatID, agentURL, mailer, cal, u.CallbackQuery)
 			}
 			if u.Message != nil {
 				handleCommand(token, chatID, u.Message)
@@ -210,7 +211,7 @@ func editMessage(token string, cb *tgCallback, suffix string) {
 	}
 }
 
-func handleCallback(token, chatID, agentURL string, mailer ReplySender, cb *tgCallback) {
+func handleCallback(token, chatID, agentURL string, mailer ReplySender, cal *CalendarClient, cb *tgCallback) {
 	if cb.Message == nil {
 		answerCallback(token, cb.ID, "Сообщение слишком старое")
 		return
@@ -286,6 +287,19 @@ func handleCallback(token, chatID, agentURL string, mailer ReplySender, cb *tgCa
 		editMessage(token, cb, "🙅 Не отвечаем")
 		log.Printf("👆 UID %d → skipped", uid)
 
+	case "cal":
+		if cal == nil {
+			answerCallback(token, cb.ID, "Календарь не настроен: нет CALENDAR_API_KEY в .env")
+			return
+		}
+		if !claimCalendarAdd(uid) {
+			answerCallback(token, cb.ID, "Уже в календаре")
+			return
+		}
+		answerCallback(token, cb.ID, "📅 Добавляю…")
+		log.Printf("👆 UID %d → в календарь", uid)
+		go addToCalendar(token, chatID, cal, e)
+
 	case "show":
 		answerCallback(token, cb.ID, "")
 
@@ -340,9 +354,14 @@ func draftAndSend(token, chatID, agentURL string, e StoredEmail) {
 		return
 	}
 
-	saveDraft(e.UID, resp.Draft)
-	e.Draft = resp.Draft
+	saveDraft(e.UID, resp)
+	if fresh, ok := getEmail(e.UID); ok {
+		e = fresh // вместе с черновиком подтянулись встреча и заметка из календаря
+	}
 	log.Printf("✍️ Черновик для UID %d готов (попыток: %d)", e.UID, resp.Attempts)
+	if resp.CalendarNote != "" {
+		log.Printf("📅 UID %d: %s", e.UID, resp.CalendarNote)
+	}
 
 	if err := sendDraftMessage(token, chatID, e, resp.Problems); err != nil {
 		log.Printf("⚠️ Не удалось отправить черновик в Telegram: %v (письмо найдётся через /pending)", err)
@@ -350,16 +369,76 @@ func draftAndSend(token, chatID, agentURL string, e StoredEmail) {
 }
 
 // sendDraftMessage — черновик с кнопками «Отправить / Переписать / Не отвечать»
+// sendDraftMessage — черновик с кнопками «Отправить / Переписать / Не отвечать»
 func sendDraftMessage(token, chatID string, e StoredEmail, problems string) error {
 	text := fmt.Sprintf("✍️ Черновик ответа\nКому: %s\nТема: Re: %s\n\n%s", e.From, e.Subject, e.Draft)
 	if problems != "" {
 		text += "\n\n⚠️ Агент так и не справился: " + problems
 	}
+	if e.CalendarNote != "" {
+		text += "\n\n🗓 " + e.CalendarNote
+	}
+	if e.MeetingStart != "" {
+		text += fmt.Sprintf("\n📅 Встреча: %s, %s–%s", e.MeetingTitle, humanTime(e.MeetingStart), shortTime(e.MeetingEnd))
+	}
 
-	return sendWithKeyboard(token, chatID, text, [][]map[string]string{
+	rows := [][]map[string]string{
 		{button("📤 Отправить", "send", e.UID), button("🔄 Переписать", "redraft", e.UID)},
 		{button("🙅 Не отвечать", "skip", e.UID)},
-	})
+	}
+	// Кнопка календаря — только если в письме есть встреча и её ещё не добавили
+	if e.MeetingStart != "" && e.CalendarEventID == "" {
+		rows[1] = append(rows[1], button("📅 В календарь", "cal", e.UID))
+	}
+
+	return sendWithKeyboard(token, chatID, text, rows)
+}
+
+// addToCalendar создаёт событие через calendar-mcp и сообщает, что вышло
+func addToCalendar(token, chatID string, cal *CalendarClient, e StoredEmail) {
+	created, err := cal.CreateEvent(context.Background(), e.MeetingTitle, e.MeetingStart, e.MeetingEnd,
+		fmt.Sprintf("Из письма от %s: %s", e.From, e.Subject))
+	if err != nil {
+		setCalendarEventID(e.UID, "") // отпускаем — можно нажать ещё раз
+		log.Printf("❌ В календарь UID %d: %v", e.UID, err)
+		if err := sendTelegramMessage(token, chatID, "⚠️ Не удалось добавить в календарь: "+err.Error()); err != nil {
+			log.Printf("⚠️ Telegram: %v", err)
+		}
+		return
+	}
+
+	setCalendarEventID(e.UID, created.Event.ID)
+	log.Printf("📅 UID %d: событие %s создано", e.UID, created.Event.ID)
+
+	text := fmt.Sprintf("📅 Добавил в календарь: %s\n%s–%s", created.Event.Title, humanTime(created.Event.Start), shortTime(created.Event.End))
+	if len(created.Conflicts) > 0 {
+		text += "\n\n⚠️ Пересекается с:"
+		for _, c := range created.Conflicts {
+			text += fmt.Sprintf("\n• %s, %s–%s", c.Title, humanTime(c.Start), shortTime(c.End))
+		}
+	}
+	if err := sendTelegramMessage(token, chatID, text); err != nil {
+		log.Printf("⚠️ Telegram: %v", err)
+	}
+}
+
+var weekdaysShortRU = [...]string{"вс", "пн", "вт", "ср", "чт", "пт", "сб"}
+
+// humanTime: «2026-10-28 13:59» → «ср 28.10 13:59»
+func humanTime(s string) string {
+	t, err := time.Parse("2006-01-02 15:04", s)
+	if err != nil {
+		return s
+	}
+	return weekdaysShortRU[t.Weekday()] + " " + t.Format("02.01 15:04")
+}
+
+// shortTime: «2026-10-28 14:59» → «14:59»
+func shortTime(s string) string {
+	if len(s) >= 16 {
+		return s[11:16]
+	}
+	return s
 }
 
 // sendDraftFailed — «черновик не получился» с кнопками «Повторить / Не отвечать»

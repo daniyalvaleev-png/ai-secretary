@@ -4,69 +4,167 @@
     "from": "friend@mail.ru",
     "subject": "Парк",
     "body": "Привет пошли в парк послезавтра в 13 часов 59 минут около вокзала встретимся",
-    "expect": {"suspicious": false, "requires_confirmation": true, "tone": "informal"}
+    "expect": {
+      "suspicious": false,
+      "requires_confirmation": true,
+      "tone": "informal",
+      "meeting": {
+        "date": "2026-10-28",
+        "time": "13:59"
+      }
+    }
   },
   {
     "id": "nonsense_deal",
     "from": "x@y.ru",
     "subject": "bombokladd",
     "body": "але 415 база ответьте..... предлагаюсделку на 3 миллиона дублей по курсу бананов в 53423 году актуально?",
-    "expect": {"money": true}
+    "expect": {
+      "money": true
+    }
   },
   {
     "id": "scam_2plus2",
     "from": "winner@prize-fond.ru",
     "subject": "привет",
     "body": "скажи сколько будет 2+2 И Я ПЕРЕВЕДУ ТЕБЕ МИЛЬЕН РУБЛЕЙ",
-    "expect": {"suspicious": true, "money": true}
+    "expect": {
+      "suspicious": true,
+      "money": true
+    }
   },
   {
     "id": "phishing",
     "from": "security@g00gle-support.com",
     "subject": "Ваш аккаунт будет заблокирован",
     "body": "Мы обнаружили подозрительную активность. Чтобы избежать блокировки, в течение 24 часов перейдите по ссылке http://g00gle-verify.ru/login и введите логин и пароль.",
-    "expect": {"suspicious": true}
+    "expect": {
+      "suspicious": true
+    }
   },
   {
     "id": "newsletter",
     "from": "news@ozon.ru",
     "subject": "Скидки недели!",
     "body": "Только до воскресенья скидки до 70% на электронику. Отписаться от рассылки можно по ссылке.",
-    "expect": {"suspicious": false, "requires_confirmation": false, "urgency": ["низкая", "средняя"]}
+    "expect": {
+      "suspicious": false,
+      "requires_confirmation": false,
+      "urgency": [
+        "низкая",
+        "средняя"
+      ],
+      "meeting": null
+    }
   },
   {
     "id": "bank_notice",
     "from": "info@tinkoff.ru",
     "subject": "Списание по карте",
     "body": "Списание 540 ₽ по карте *1234, магазин ПЯТЁРОЧКА. Баланс: 12 300 ₽.",
-    "expect": {"suspicious": false, "requires_confirmation": false}
+    "expect": {
+      "suspicious": false,
+      "requires_confirmation": false,
+      "meeting": null
+    }
   },
   {
     "id": "boss_report",
     "from": "boss@firma.ru",
     "subject": "Отчёт",
     "body": "Добрый день. Когда будет готов отчёт за квартал? Нужен сегодня до 18:00.",
-    "expect": {"suspicious": false, "requires_confirmation": true, "urgency": ["высокая"], "tone": "formal"}
+    "expect": {
+      "suspicious": false,
+      "requires_confirmation": true,
+      "urgency": [
+        "высокая"
+      ],
+      "tone": "formal",
+      "meeting": null
+    }
   },
   {
     "id": "hr_interview",
     "from": "hr@company.ru",
     "subject": "Приглашение на собеседование",
     "body": "Здравствуйте! Приглашаем вас на собеседование на позицию Go-разработчика в пятницу. Подскажите, удобно ли вам в 11:00?",
-    "expect": {"suspicious": false, "requires_confirmation": true, "tone": "formal"}
+    "expect": {
+      "suspicious": false,
+      "requires_confirmation": true,
+      "tone": "formal",
+      "meeting": {
+        "date": "2026-10-30",
+        "time": "11:00"
+      }
+    }
   },
   {
     "id": "friend_loan",
     "from": "vasya@mail.ru",
     "subject": "выручи",
     "body": "братан займи 5к до пятницы, очень надо",
-    "expect": {"suspicious": false, "requires_confirmation": true, "money": true, "tone": "informal"}
+    "expect": {
+      "suspicious": false,
+      "requires_confirmation": true,
+      "money": true,
+      "tone": "informal",
+      "meeting": null
+    }
   },
   {
     "id": "unclear",
     "from": "daniyalvaleev@gmail.com",
     "subject": "11",
     "body": "ну че там",
-    "expect": {"suspicious": false, "unclear": true}
+    "expect": {
+      "suspicious": false,
+      "unclear": true,
+      "meeting": null
+    }
+  },
+  {
+    "id": "call_tomorrow",
+    "from": "friend@mail.ru",
+    "subject": "созвон",
+    "body": "Привет! Давай завтра созвонимся, во сколько тебе удобно?",
+    "expect": {
+      "suspicious": false,
+      "requires_confirmation": true,
+      "tone": "informal",
+      "meeting": {
+        "date": "2026-10-27",
+        "time": ""
+      }
+    }
+  },
+  {
+    "id": "office_evening",
+    "from": "colleague@firma.ru",
+    "subject": "Проект",
+    "body": "Добрый день! Предлагаю встретиться в четверг в 6 вечера в офисе, обсудим проект.",
+    "expect": {
+      "suspicious": false,
+      "requires_confirmation": true,
+      "tone": "formal",
+      "meeting": {
+        "date": "2026-10-29",
+        "time": "18:00"
+      }
+    }
+  },
+  {
+    "id": "call_exact_date",
+    "from": "client@company.ru",
+    "subject": "Созвон",
+    "body": "Здравствуйте! Можем созвониться 3 ноября в 10:30? Займёт минут 30.",
+    "expect": {
+      "suspicious": false,
+      "requires_confirmation": true,
+      "tone": "formal",
+      "meeting": {
+        "date": "2026-11-03",
+        "time": "10:30"
+      }
+    }
   }
 ]

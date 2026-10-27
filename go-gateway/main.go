@@ -86,7 +86,12 @@ func main() {
 		if err != nil {
 			log.Fatalf("❌ Отправка почты не настроена: %v", err)
 		}
-		go runTelegramBot(cfg.TgToken, cfg.TgChatID, getenvDefault("AGENT_URL", "http://127.0.0.1:8090"), mailer)
+		// Календарь необязателен: нет ключа — кнопки «В календарь» просто не будут работать
+		var cal *CalendarClient
+		if key := os.Getenv("CALENDAR_API_KEY"); key != "" {
+			cal = &CalendarClient{URL: getenvDefault("CALENDAR_URL", "http://127.0.0.1:8095/mcp"), APIKey: key}
+		}
+		go runTelegramBot(cfg.TgToken, cfg.TgChatID, getenvDefault("AGENT_URL", "http://127.0.0.1:8090"), mailer, cal)
 	}
 
 	log.Printf("🚀 Шлюз запущен, проверяю почту каждые %s (Ctrl+C — стоп)", cfg.Interval)

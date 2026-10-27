@@ -1,17 +1,20 @@
-"""LangGraph-граф: пишет черновик ответа на письмо и сам проверяет его.
+"""LangGraph-граф: смотрит календарь, пишет черновик ответа и сам его проверяет.
 
-START -> write_draft -> check_draft -> есть проблемы и попытки не кончились?
-                                          да  -> снова write_draft
-                                          нет -> END
+START -> extract_meeting -> check_calendar -> write_draft -> check_draft -> есть проблемы и попытки не кончились?
+                                                                              да  -> снова write_draft
+                                                                              нет -> END
 """
 
 import os
 import re
+from datetime import date
 from typing import TypedDict
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
 from langgraph.graph import END, START, StateGraph
+
+from meeting import Extracted, Meeting, check_calendar, extract_meeting
 
 MAX_ATTEMPTS = 3
 
@@ -32,6 +35,7 @@ SYSTEM_PROMPT = """Ты пишешь ответ на письмо от имен�
 - Используй только факты из письма. Не придумывай сроки, даты и обещания: если спрашивают «когда» — ответь, что уточнишь и напишешь.
 - Никогда не соглашайся от имени владельца на деньги, займы, сделки и обязательства — ответь, что посмотришь и вернёшься с ответом.
 - Если непонятно, чего хотят, — коротко переспроси.
+- Строка «Календарь:» в конце письма — это твой календарь, отправитель её не видит. СВОБОДНО — соглашайся. ЗАНЯТО — скажи, что в это время не выйдет, и предложи время из «Можно предложить». Не пересказывай эту строку и не объясняй, чем занят.
 - Не рассуждай про само письмо, правила или свою роль. Просто ответь как человек.
 - Не цитируй грубости. Без темы, подписи и заготовок вроде [Имя].
 
@@ -50,13 +54,18 @@ EXAMPLES = [
     AIMessage("Привет! Гляну, что у меня по деньгам, и отпишусь чуть позже."),
     HumanMessage("От: kolya@mail.ru\nТема: ыы\n\nну а дальше то что"),
     AIMessage("Привет! Не совсем понял, о чём ты, — можешь объяснить подробнее?"),
+    # Примеры с календарём: как превращать сухие факты в человеческий ответ
+    HumanMessage("От: misha@mail.ru\nТема: кино\n\nпогнали в кино в субботу в 19:00?\n\nКалендарь: в субботу в 19:00 — ЗАНЯТО. Можно предложить: 17:00 или 21:00."),
+    AIMessage("Привет! В 19 не выйдет, давай в 17:00 или в 21:00?"),
+    HumanMessage("От: anna@company.ru\nТема: Созвон\n\nДобрый день! Давайте созвонимся завтра, когда вам удобно?\n\nКалендарь: завтра — свободен весь день."),
+    AIMessage("Здравствуйте! Завтра подойдёт любое время — назовите удобное вам, и созвонимся."),
 ]
 
 # Правила-ограждения в коде: промпт — это просьба, а проверка — гарантия
 FORMAL = re.compile(r"(здравствуйте|добрый (день|вечер|утро)|уважаем)", re.I)
 MONEY = re.compile(r"(руб|₽|деньг|денег|миллион|тыс|\d\s?к\b|перевед|переведу|займ|одолж|оплат|сделк|договор)", re.I)
 AGREEMENT = re.compile(r"\b(согласен|согласна|принимаю|договорились|переведу|скину|займу|одолжу|выручу|оплачу|без проблем|да,? конечно)\b", re.I)
-META = re.compile(r"(правил|не могу ответить на это|это письмо содержит|как ии|как ассистент)", re.I)
+META = re.compile(r"(правил|не могу ответить на это|это письмо содержит|как ии|как ассистент|владел|факт|календар)", re.I)
 
 
 class DraftState(TypedDict):
@@ -66,10 +75,29 @@ class DraftState(TypedDict):
     draft: str
     problems: str  # что не так с последним черновиком; пусто — всё ок
     attempts: int
+    today: str  # 2026-10-26 — «сегодня» для таблицы дат; в eval фиксируется
+    extracted: Extracted | None  # встреча из письма, как её поняла модель
+    meeting: Meeting | None  # что положить в календарь по кнопке
+    calendar_note: str  # факты из календаря для черновика
+
+
+def extract_meeting_node(state: DraftState) -> dict:
+    ex = extract_meeting(state["sender"], state["subject"], state["body"], date.fromisoformat(state["today"]))
+    return {"extracted": ex}
+
+
+def check_calendar_node(state: DraftState) -> dict:
+    if not state["extracted"]:
+        return {"calendar_note": "", "meeting": None}
+    note, meeting = check_calendar(state["extracted"])
+    return {"calendar_note": note, "meeting": meeting}
 
 
 def write_draft(state: DraftState) -> dict:
     text = f"От: {state['sender']}\nТема: {state['subject']}\n\n{state['body']}"
+
+    if state["calendar_note"]:
+        text += "\n\n" + state["calendar_note"]  # «Календарь: …» — формат как в примерах
 
     # На повторной попытке говорим модели, где она накосячила
     if state["problems"]:
@@ -118,16 +146,20 @@ def route_after_check(state: DraftState) -> str:
 
 
 builder = StateGraph(DraftState)
+builder.add_node("extract_meeting", extract_meeting_node)
+builder.add_node("check_calendar", check_calendar_node)
 builder.add_node("write_draft", write_draft)
 builder.add_node("check_draft", check_draft)
-builder.add_edge(START, "write_draft")
+builder.add_edge(START, "extract_meeting")
+builder.add_edge("extract_meeting", "check_calendar")
+builder.add_edge("check_calendar", "write_draft")
 builder.add_edge("write_draft", "check_draft")
 builder.add_conditional_edges("check_draft", route_after_check, ["write_draft", END])
 
 draft_graph = builder.compile()
 
 
-def make_draft(sender: str, subject: str, body: str) -> DraftState:
+def make_draft(sender: str, subject: str, body: str, today: date | None = None) -> DraftState:
     return draft_graph.invoke(
         {
             "sender": sender,
@@ -136,5 +168,9 @@ def make_draft(sender: str, subject: str, body: str) -> DraftState:
             "draft": "",
             "problems": "",
             "attempts": 0,
+            "today": (today or date.today()).isoformat(),
+            "extracted": None,
+            "meeting": None,
+            "calendar_note": "",
         }
     )

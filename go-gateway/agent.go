@@ -19,10 +19,19 @@ type draftRequest struct {
 }
 
 type draftResponse struct {
-	UID      uint32 `json:"uid"`
-	Draft    string `json:"draft"`
-	Attempts int    `json:"attempts"`
-	Problems string `json:"problems"`
+	UID          uint32        `json:"uid"`
+	Draft        string        `json:"draft"`
+	Attempts     int           `json:"attempts"`
+	Problems     string        `json:"problems"`
+	Meeting      *draftMeeting `json:"meeting"`       // nil — встречи в письме нет
+	CalendarNote string        `json:"calendar_note"` // что агент узнал из календаря
+}
+
+// draftMeeting — встреча, которую агент нашёл в письме. Время — «2026-10-28 13:59» по поясу владельца.
+type draftMeeting struct {
+	Title string `json:"title"`
+	Start string `json:"start"`
+	End   string `json:"end"`
 }
 
 // requestDraft просит Python-агента (LangGraph) написать черновик ответа
