@@ -14,6 +14,7 @@ type Event struct {
 	Start       time.Time `json:"start"`
 	End         time.Time `json:"end"`
 	Description string    `json:"description,omitempty"`
+	Free        bool      `json:"free,omitempty"` // событие есть, но время не занимает (в Google — «Свободен»)
 }
 
 // Calendar — всё, что секретарю нужно от календаря.
@@ -42,6 +43,7 @@ func FreeSlots(ctx context.Context, cal Calendar, day time.Time, workStart, work
 	if err != nil {
 		return nil, err
 	}
+	events = busyOnly(events)
 	sort.Slice(events, func(i, j int) bool { return events[i].Start.Before(events[j].Start) })
 
 	var slots []Slot
@@ -70,4 +72,15 @@ func minTime(a, b time.Time) time.Time {
 		return a
 	}
 	return b
+}
+
+// busyOnly убирает события, которые не занимают время: день рождения друга — не повод отказывать во встрече
+func busyOnly(events []Event) []Event {
+	busy := []Event{}
+	for _, e := range events {
+		if !e.Free {
+			busy = append(busy, e)
+		}
+	}
+	return busy
 }

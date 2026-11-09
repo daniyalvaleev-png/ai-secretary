@@ -1,3 +1,5 @@
 .env
 calendar.db*
 *.exe
+credentials.json
+google_token.json

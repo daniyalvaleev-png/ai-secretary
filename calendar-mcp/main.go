@@ -3,6 +3,7 @@ package main
 
 import (
 	"crypto/subtle"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -12,9 +13,17 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	
 )
 
 func main() {
+	// Разовая команда: go run . google-auth — вход в Google и сохранение google_token.json
+	if len(os.Args) > 1 && os.Args[1] == "google-auth" {
+		if err := runGoogleAuth(); err != nil {
+			log.Fatalf("❌ %v", err)
+		}
+		return
+	}
 	_ = godotenv.Load() // .env необязателен — можно задать переменные окружения напрямую
 
 	addr := getenvDefault("CALENDAR_ADDR", "127.0.0.1:8095")
@@ -28,11 +37,10 @@ func main() {
 		log.Fatalf("❌ Кривой CALENDAR_TZ: %v", err)
 	}
 
-	cal, err := NewSQLiteCalendar(getenvDefault("CALENDAR_DB", "calendar.db"), loc)
+	cal, err := newCalendar(loc)
 	if err != nil {
-		log.Fatalf("❌ Не поднялась база календаря: %v", err)
+		log.Fatalf("❌ Календарь не поднялся: %v", err)
 	}
-	defer cal.Close()
 
 	server := newMCPServer(cal, loc)
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil)
@@ -43,6 +51,20 @@ func main() {
 	mux.Handle("/mcp", requireAPIKey(apiKey, handler))
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatalf("❌ %v", err)
+	}
+}
+
+// newCalendar выбирает реализацию по CALENDAR_BACKEND из .env — это единственное место, которое про неё знает
+func newCalendar(loc *time.Location) (Calendar, error) {
+	switch backend := getenvDefault("CALENDAR_BACKEND", "sqlite"); backend {
+	case "google":
+		log.Println("📅 Календарь: Google Calendar")
+		return newGoogleCalendar(getenvDefault("CALENDAR_GOOGLE_ID", "primary"), loc)
+	case "sqlite":
+		log.Println("📅 Календарь: локальный SQLite")
+		return NewSQLiteCalendar(getenvDefault("CALENDAR_DB", "calendar.db"), loc)
+	default:
+		return nil, fmt.Errorf("CALENDAR_BACKEND=%q, а надо sqlite или google", backend)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -21,8 +22,18 @@ func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
 
 // Полный цикл, как у агента: HTTP-сервер с ключом → MCP-клиент → вызовы инструментов
 func TestMCPOverHTTP(t *testing.T) {
-	ctx := context.Background()
 	cal, loc := newTestCalendar(t)
+	testMCPOverHTTP(t, cal, loc)
+}
+
+// Те же инструменты поверх Google: tools.go ничего не знает о том, какой календарь внутри
+func TestMCPOverGoogle(t *testing.T) {
+	cal, _ := newFakeGoogle(t)
+	testMCPOverHTTP(t, cal, cal.Loc)
+}
+
+func testMCPOverHTTP(t *testing.T, cal Calendar, loc *time.Location) {
+	ctx := context.Background()
 
 	server := newMCPServer(cal, loc)
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil)

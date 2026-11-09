@@ -218,7 +218,7 @@ func (t *tools) createEvent(ctx context.Context, _ *mcp.CallToolRequest, in crea
 		return nil, createEventOut{}, err
 	}
 
-	return nil, createEventOut{Event: t.toOut([]Event{e})[0], Conflicts: t.toOut(conflicts)}, nil
+	return nil, createEventOut{Event: t.toOut([]Event{e})[0], Conflicts: t.toOut(busyOnly(conflicts))}, nil
 }
 
 func (t *tools) deleteEvent(ctx context.Context, _ *mcp.CallToolRequest, in deleteEventIn) (*mcp.CallToolResult, deleteEventOut, error) {
