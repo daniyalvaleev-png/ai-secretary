@@ -68,6 +68,13 @@ func main() {
 		}
 		return
 	}
+	// Разовые команды для пользователей API: go run . create-user <логин> / reset-password <логин>
+	if len(os.Args) > 1 && (os.Args[1] == "create-user" || os.Args[1] == "reset-password") {
+		if err := runUserCommand(os.Args[1], os.Args[2:]); err != nil {
+			log.Fatalf("❌ %v", err)
+		}
+		return
+	}
 	if err := godotenv.Load(); err != nil {
 		log.Fatal("Ошибка загрузки .env файла. Убедись, что он лежит в той же папке")
 	}
@@ -79,7 +86,8 @@ func main() {
 	}
 	defer db.Close()
 	resetStuckStatuses()
-	go startAPI(getenvDefault("API_ADDR", "127.0.0.1:8080"), os.Getenv("API_KEY"))
+	// API_CORS_ORIGINS — с каких адресов браузеру можно ходить в API (Flutter Web), через запятую
+	go startAPI(getenvDefault("API_ADDR", "127.0.0.1:8080"), strings.Split(os.Getenv("API_CORS_ORIGINS"), ","))
 
 	if cfg.TgToken != "" && cfg.TgChatID != "" {
 		mailer, err := newReplySender(cfg)

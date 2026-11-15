@@ -75,7 +75,8 @@ func initDB() error {
 		)`,
 	}
 
-	for _, q := range schema {
+	// Таблицы пользователей и сессий описаны в auth.go — рядом с кодом, который с ними работает
+	for _, q := range append(schema, authSchema...) {
 		if _, err := db.Exec(q); err != nil {
 			return fmt.Errorf("создание таблиц: %w", err)
 		}

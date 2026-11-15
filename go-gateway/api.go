@@ -1,12 +1,12 @@
 package main
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var allowedStatuses = map[string]bool{
@@ -24,39 +24,82 @@ var allowedStatuses = map[string]bool{
 }
 
 // startAPI поднимает HTTP API. Блокирует, поэтому запускаем в горутине.
-func startAPI(addr, apiKey string) {
-	if strings.TrimSpace(apiKey) == "" {
-		log.Println("⚠️ API_KEY не задан — HTTP API не запущен")
-		return
-	}
-
+// newAPIHandler собирает все маршруты. Отдельно от startAPI — чтобы тесты гоняли тот же самый обработчик.
+func newAPIHandler(corsOrigins []string) http.Handler {
+	auth := newAuthHandlers()
 	mux := http.NewServeMux()
 
-	// Go 1.22+: метод и {uid} прямо в шаблоне пути
+	// Открытые: без входа
 	mux.HandleFunc("GET /api/health", handleHealth)
-	mux.HandleFunc("GET /api/emails", handleListEmails)
-	mux.HandleFunc("GET /api/emails/{uid}", handleGetEmail)
-	mux.HandleFunc("POST /api/emails/{uid}/status", handleSetStatus)
+	mux.HandleFunc("POST /api/login", auth.login)
+
+	// Закрытые: только с токеном сессии. Go 1.22+: метод и {uid} прямо в шаблоне пути
+	mux.Handle("POST /api/logout", requireSession(auth.logout))
+	mux.Handle("GET /api/me", requireSession(handleMe))
+	mux.Handle("GET /api/emails", requireSession(handleListEmails))
+	mux.Handle("GET /api/emails/{uid}", requireSession(handleGetEmail))
+	mux.Handle("POST /api/emails/{uid}/status", requireSession(handleSetStatus))
+
+	return withCORS(corsOrigins, mux)
+}
+
+// startAPI поднимает HTTP API. Блокирует, поэтому запускаем в горутине.
+func startAPI(addr string, corsOrigins []string) {
+	cleanupSessions()
+	if countUsers() == 0 {
+		log.Println("⚠️ В API ещё нет пользователей — создай: go run . create-user <логин>")
+	}
+
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: newAPIHandler(corsOrigins),
+		// Таймауты — чтобы медленный или зависший клиент не держал соединения вечно
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+	}
 
 	log.Printf("🌐 HTTP API слушает http://%s", addr)
-	if err := http.ListenAndServe(addr, requireAPIKey(apiKey, mux)); err != nil {
+	if err := srv.ListenAndServe(); err != nil {
 		log.Printf("❌ HTTP API упал: %v", err)
 	}
 }
 
-// requireAPIKey пускает только запросы с заголовком Authorization: Bearer <API_KEY>
-func requireAPIKey(apiKey string, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+// withCORS разрешает браузеру ходить в API со страниц из списка (Flutter Web на другом порту).
+// Токен идёт в заголовке Authorization, а не в cookie, поэтому чужой сайт не может слать запросы от твоего имени.
+func withCORS(origins []string, next http.Handler) http.Handler {
+	allowed := map[string]bool{}
+	for _, o := range origins {
+		if o = strings.TrimSpace(o); o != "" {
+			allowed[o] = true
+		}
+	}
 
-		// ConstantTimeCompare — чтобы ключ нельзя было подобрать по времени ответа
-		if subtle.ConstantTimeCompare([]byte(got), []byte(apiKey)) != 1 {
-			writeError(w, http.StatusUnauthorized, "нужен заголовок Authorization: Bearer <API_KEY>")
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if origin := r.Header.Get("Origin"); allowed[origin] {
+			h := w.Header()
+			h.Set("Access-Control-Allow-Origin", origin)
+			h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			h.Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			h.Set("Access-Control-Max-Age", "600")
+			h.Add("Vary", "Origin")
+		}
+
+		// Предварительный запрос браузера (preflight): отвечаем сразу, без проверки входа
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// decodeJSON читает тело запроса не больше 64 КБ — гигабайтный JSON не положит сервер
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	return json.NewDecoder(r.Body).Decode(v)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -135,7 +178,7 @@ func handleSetStatus(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Status string `json:"status"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "тело должно быть JSON: {\"status\":\"...\"}")
 		return
 	}
