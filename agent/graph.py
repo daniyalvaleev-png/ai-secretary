@@ -67,7 +67,7 @@ MONEY = re.compile(r"(руб|₽|деньг|денег|миллион|тыс|\d\
 AGREEMENT = re.compile(r"\b(согласен|согласна|принимаю|договорились|переведу|скину|займу|одолжу|выручу|оплачу|без проблем|да,? конечно)\b", re.I)
 META = re.compile(r"(правил|не могу ответить на это|это письмо содержит|как ии|как ассистент|владел|факт|календар)", re.I)
 
-
+TIME = re.compile(r"\b\d{1,2}:\d{2}\b")
 class DraftState(TypedDict):
     sender: str
     subject: str
@@ -136,6 +136,11 @@ def check_draft(state: DraftState) -> dict:
     if META.search(draft):
         problems.append("не рассуждай про письмо и правила — просто ответь как человек")
 
+        # Время свободно, а модель предлагает другое — копирует пример про ЗАНЯТО
+    free = re.search(r"в (\d{2}:\d{2}) — СВОБОДНО", state["calendar_note"])
+    if free and any(t.zfill(5) != free[1] for t in TIME.findall(draft)):
+        problems.append(f"время {free[1]} свободно — просто согласись, не предлагай другое")
+        
     return {"problems": "; ".join(problems)}
 
 

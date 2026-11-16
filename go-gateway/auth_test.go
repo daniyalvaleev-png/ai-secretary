@@ -25,7 +25,7 @@ func newTestAPI(t *testing.T, origins ...string) *httptest.Server {
 	if err := createUser("Daniyal", "correct-horse-1"); err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(newAPIHandler(origins))
+	srv := httptest.NewServer(newAPIHandler(origins, &App{}))
 	t.Cleanup(srv.Close)
 	return srv
 }

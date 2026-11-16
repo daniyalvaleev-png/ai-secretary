@@ -11,7 +11,7 @@ import (
 )
 
 // CalendarClient ходит в микросервис calendar-mcp по тому же протоколу MCP, что и агент.
-// Шлюз — тоже MCP-клиент: ему нужен только create_event для кнопки «В календарь».
+// Шлюзу нужны create_event (кнопка «В календарь») и list_events (календарь в приложении).
 type CalendarClient struct {
 	URL    string
 	APIKey string
@@ -31,6 +31,16 @@ type createdEvent struct {
 	} `json:"conflicts"`
 }
 
+// calendarEvent — событие, как его отдаёт calendar-mcp (время «2026-10-28 13:59» по поясу владельца)
+type calendarEvent struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Start       string `json:"start"`
+	End         string `json:"end"`
+	Weekday     string `json:"weekday"`
+	Description string `json:"description,omitempty"`
+}
+
 // bearerTransport добавляет ключ календаря к каждому HTTP-запросу MCP-клиента
 type bearerTransport struct{ key string }
 
@@ -40,7 +50,8 @@ func (b bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return http.DefaultTransport.RoundTrip(r)
 }
 
-func (c *CalendarClient) CreateEvent(ctx context.Context, title, start, end, description string) (createdEvent, error) {
+// callTool — один вызов MCP-инструмента календаря; ответ кладётся в out
+func (c *CalendarClient) callTool(ctx context.Context, name string, args map[string]any, out any) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
@@ -51,21 +62,13 @@ func (c *CalendarClient) CreateEvent(ctx context.Context, title, start, end, des
 		MaxRetries: -1, // календарь лежит — сразу ошибка, без ретраев
 	}, nil)
 	if err != nil {
-		return createdEvent{}, fmt.Errorf("календарь недоступен (запущен calendar-mcp?): %w", err)
+		return fmt.Errorf("календарь недоступен (запущен calendar-mcp?): %w", err)
 	}
 	defer session.Close()
 
-	res, err := session.CallTool(ctx, &mcp.CallToolParams{
-		Name: "create_event",
-		Arguments: map[string]any{
-			"title":       title,
-			"start":       start,
-			"end":         end,
-			"description": description,
-		},
-	})
+	res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
 	if err != nil {
-		return createdEvent{}, err
+		return err
 	}
 
 	text := ""
@@ -75,12 +78,31 @@ func (c *CalendarClient) CreateEvent(ctx context.Context, title, start, end, des
 		}
 	}
 	if res.IsError {
-		return createdEvent{}, fmt.Errorf("календарь: %s", text)
+		return fmt.Errorf("календарь: %s", text)
 	}
 
-	var out createdEvent
-	if err := json.Unmarshal([]byte(text), &out); err != nil {
-		return createdEvent{}, fmt.Errorf("кривой ответ календаря: %w", err)
+	if err := json.Unmarshal([]byte(text), out); err != nil {
+		return fmt.Errorf("кривой ответ календаря: %w", err)
 	}
-	return out, nil
+	return nil
+}
+
+func (c *CalendarClient) CreateEvent(ctx context.Context, title, start, end, description string) (createdEvent, error) {
+	var out createdEvent
+	err := c.callTool(ctx, "create_event", map[string]any{
+		"title":       title,
+		"start":       start,
+		"end":         end,
+		"description": description,
+	}, &out)
+	return out, err
+}
+
+// ListEvents — события за период; from/to — «2026-10-28» или «2026-10-28 09:00», как понимает calendar-mcp
+func (c *CalendarClient) ListEvents(ctx context.Context, from, to string) ([]calendarEvent, error) {
+	var out struct {
+		Events []calendarEvent `json:"events"`
+	}
+	err := c.callTool(ctx, "list_events", map[string]any{"from": from, "to": to}, &out)
+	return out.Events, err
 }

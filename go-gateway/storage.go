@@ -300,3 +300,14 @@ func resetStuckStatuses() {
 		log.Printf("⚠️ Не удалось сбросить зависшие добавления в календарь: %v", err)
 	}
 }
+
+// updateDraftText меняет текст черновика, только пока он готов и ещё не отправляется
+func updateDraftText(uid uint32, text string) bool {
+	res, err := db.Exec(`UPDATE emails SET draft = ? WHERE uid = ? AND status = 'draft_ready'`, text, uid)
+	if err != nil {
+		log.Printf("⚠️ updateDraftText UID %d: %v", uid, err)
+		return false
+	}
+	n, _ := res.RowsAffected()
+	return n > 0
+}

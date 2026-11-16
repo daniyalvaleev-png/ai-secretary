@@ -87,20 +87,29 @@ func main() {
 	defer db.Close()
 	resetStuckStatuses()
 	// API_CORS_ORIGINS — с каких адресов браузеру можно ходить в API (Flutter Web), через запятую
-	go startAPI(getenvDefault("API_ADDR", "127.0.0.1:8080"), strings.Split(os.Getenv("API_CORS_ORIGINS"), ","))
-
-	if cfg.TgToken != "" && cfg.TgChatID != "" {
-		mailer, err := newReplySender(cfg)
-		if err != nil {
-			log.Fatalf("❌ Отправка почты не настроена: %v", err)
-		}
-		// Календарь необязателен: нет ключа — кнопки «В календарь» просто не будут работать
-		var cal *CalendarClient
-		if key := os.Getenv("CALENDAR_API_KEY"); key != "" {
-			cal = &CalendarClient{URL: getenvDefault("CALENDAR_URL", "http://127.0.0.1:8095/mcp"), APIKey: key}
-		}
-		go runTelegramBot(cfg.TgToken, cfg.TgChatID, getenvDefault("AGENT_URL", "http://127.0.0.1:8090"), mailer, cal)
+	// App — действия над письмами; им пользуются и Telegram-бот, и HTTP API
+	mailer, err := newReplySender(cfg)
+	if err != nil {
+		log.Fatalf("❌ Отправка почты не настроена: %v", err)
 	}
+	app := &App{AgentURL: getenvDefault("AGENT_URL", "http://127.0.0.1:8090"), Mailer: mailer}
+
+	// Календарь необязателен: нет ключа — «В календарь» ответит, что он не настроен
+	if key := os.Getenv("CALENDAR_API_KEY"); key != "" {
+		app.Calendar = &CalendarClient{URL: getenvDefault("CALENDAR_URL", "http://127.0.0.1:8095/mcp"), APIKey: key}
+	}
+
+	// Бот подключаем до старта API: результаты действий из приложения тоже приходят в Telegram
+	if cfg.TgToken != "" && cfg.TgChatID != "" {
+		bot := &Bot{Token: cfg.TgToken, ChatID: cfg.TgChatID, App: app}
+		app.Notify = bot
+		go bot.Run()
+	}
+
+	// API_CORS_ORIGINS — с каких адресов браузеру можно ходить в API (Flutter Web), через запятую
+	go startAPI(getenvDefault("API_ADDR", "127.0.0.1:8080"), strings.Split(os.Getenv("API_CORS_ORIGINS"), ","), app)
+
+	
 
 	log.Printf("🚀 Шлюз запущен, проверяю почту каждые %s (Ctrl+C — стоп)", cfg.Interval)
 

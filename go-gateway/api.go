@@ -23,10 +23,10 @@ var allowedStatuses = map[string]bool{
 	"sending":      true,
 }
 
-// startAPI поднимает HTTP API. Блокирует, поэтому запускаем в горутине.
 // newAPIHandler собирает все маршруты. Отдельно от startAPI — чтобы тесты гоняли тот же самый обработчик.
-func newAPIHandler(corsOrigins []string) http.Handler {
+func newAPIHandler(corsOrigins []string, app *App) http.Handler {
 	auth := newAuthHandlers()
+	act := &actionHandlers{app: app}
 	mux := http.NewServeMux()
 
 	// Открытые: без входа
@@ -38,13 +38,22 @@ func newAPIHandler(corsOrigins []string) http.Handler {
 	mux.Handle("GET /api/me", requireSession(handleMe))
 	mux.Handle("GET /api/emails", requireSession(handleListEmails))
 	mux.Handle("GET /api/emails/{uid}", requireSession(handleGetEmail))
-	mux.Handle("POST /api/emails/{uid}/status", requireSession(handleSetStatus))
+
+	// Действия — те же, что кнопки в Telegram
+	mux.Handle("POST /api/emails/{uid}/confirm", requireSession(act.handle(app.Confirm, http.StatusAccepted)))
+	mux.Handle("POST /api/emails/{uid}/reject", requireSession(act.handle(app.Reject, http.StatusOK)))
+	mux.Handle("POST /api/emails/{uid}/redraft", requireSession(act.handle(app.Redraft, http.StatusAccepted)))
+	mux.Handle("POST /api/emails/{uid}/send", requireSession(act.handle(app.Send, http.StatusAccepted)))
+	mux.Handle("POST /api/emails/{uid}/skip", requireSession(act.handle(app.Skip, http.StatusOK)))
+	mux.Handle("POST /api/emails/{uid}/calendar", requireSession(act.handle(app.AddToCalendar, http.StatusAccepted)))
+	mux.Handle("POST /api/emails/{uid}/draft", requireSession(act.editDraft))
+	mux.Handle("GET /api/calendar", requireSession(act.listCalendar))
 
 	return withCORS(corsOrigins, mux)
 }
 
 // startAPI поднимает HTTP API. Блокирует, поэтому запускаем в горутине.
-func startAPI(addr string, corsOrigins []string) {
+func startAPI(addr string, corsOrigins []string, app *App) {
 	cleanupSessions()
 	if countUsers() == 0 {
 		log.Println("⚠️ В API ещё нет пользователей — создай: go run . create-user <логин>")
@@ -52,7 +61,7 @@ func startAPI(addr string, corsOrigins []string) {
 
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: newAPIHandler(corsOrigins),
+		Handler: newAPIHandler(corsOrigins, app),
 		// Таймауты — чтобы медленный или зависший клиент не держал соединения вечно
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -169,32 +178,3 @@ func handleGetEmail(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/emails/{uid}/status  {"status":"confirmed"}
-func handleSetStatus(w http.ResponseWriter, r *http.Request) {
-	uid, ok := parseUID(w, r)
-	if !ok {
-		return
-	}
-
-	var req struct {
-		Status string `json:"status"`
-	}
-	if err := decodeJSON(w, r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "тело должно быть JSON: {\"status\":\"...\"}")
-		return
-	}
-
-	if !allowedStatuses[req.Status] {
-		writeError(w, http.StatusBadRequest, "status: pending, confirmed, rejected или done")
-		return
-	}
-
-	if !updateEmailStatus(uid, req.Status) {
-		writeError(w, http.StatusNotFound, "письмо не найдено")
-		return
-	}
-
-	log.Printf("🌐 API: UID %d → %s", uid, req.Status)
-
-	e, _ := getEmail(uid)
-	writeJSON(w, http.StatusOK, e)
-}

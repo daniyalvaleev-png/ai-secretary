@@ -2,8 +2,8 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -104,86 +104,12 @@ func sendTelegramMessage(token, chatID, text string) error {
 
 // sendEmailAlert — уведомление о письме с кнопками под ним
 func sendEmailAlert(token, chatID string, uid uint32, text string) error {
-	id := strconv.FormatUint(uint64(uid), 10)
-
-	keyboard := map[string]any{
-		"inline_keyboard": [][]map[string]string{
-			{
-				{"text": "✅ Подтвердить", "callback_data": "confirm:" + id},
-				{"text": "❌ Отклонить", "callback_data": "reject:" + id},
-			},
-			{
-				{"text": "📄 Показать письмо", "callback_data": "show:" + id},
-			},
-		},
-	}
-
-	return tgCall(token, "sendMessage", map[string]any{
-		"chat_id":                  chatIDValue(chatID),
-		"text":                     text,
-		"disable_web_page_preview": true,
-		"reply_markup":             keyboard,
-	}, nil)
+	return sendWithKeyboard(token, chatID, text, [][]map[string]string{
+		{button("✅ Подтвердить", "confirm", uid), button("❌ Отклонить", "reject", uid)},
+		{button("📄 Показать письмо", "show", uid)},
+	})
 }
 
-type tgCallback struct {
-	ID      string `json:"id"`
-	Data    string `json:"data"`
-	Message *struct {
-		MessageID int64  `json:"message_id"`
-		Text      string `json:"text"`
-		Chat      struct {
-			ID int64 `json:"id"`
-		} `json:"chat"`
-	} `json:"message"`
-}
-
-type tgUpdate struct {
-	UpdateID      int64       `json:"update_id"`
-	CallbackQuery *tgCallback `json:"callback_query"`
-	Message       *tgMessage  `json:"message"`
-}
-
-// runTelegramBot крутится в отдельной горутине и ловит нажатия кнопок (long polling)
-func runTelegramBot(token, chatID, agentURL string, mailer ReplySender, cal *CalendarClient) {
-	log.Println("🤖 Telegram-бот слушает кнопки")
-	setBotCommands(token)
-
-	var offset int64
-	for {
-		var updates []tgUpdate
-		err := tgCall(token, "getUpdates", map[string]any{
-			"offset":          offset,
-			"timeout":         20,
-			"allowed_updates": []string{"callback_query", "message"},
-		}, &updates)
-		if err != nil {
-			log.Printf("⚠️ getUpdates: %v", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
-
-		for _, u := range updates {
-			// offset = последний update_id + 1, иначе Telegram будет слать те же нажатия снова
-			offset = u.UpdateID + 1
-			if u.CallbackQuery != nil {
-				handleCallback(token, chatID, agentURL, mailer, cal, u.CallbackQuery)
-			}
-			if u.Message != nil {
-				handleCommand(token, chatID, u.Message)
-			}
-		}
-	}
-}
-
-func answerCallback(token, callbackID, text string) {
-	if err := tgCall(token, "answerCallbackQuery", map[string]any{
-		"callback_query_id": callbackID,
-		"text":              text,
-	}, nil); err != nil {
-		log.Printf("⚠️ answerCallbackQuery: %v", err)
-	}
-}
 func button(text, action string, uid uint32) map[string]string {
 	return map[string]string{
 		"text":          text,
@@ -200,175 +126,6 @@ func sendWithKeyboard(token, chatID, text string, rows [][]map[string]string) er
 	}, nil)
 }
 
-// editMessage дописывает строку к сообщению с кнопкой и убирает кнопки (нет reply_markup)
-func editMessage(token string, cb *tgCallback, suffix string) {
-	if err := tgCall(token, "editMessageText", map[string]any{
-		"chat_id":    cb.Message.Chat.ID,
-		"message_id": cb.Message.MessageID,
-		"text":       cb.Message.Text + "\n\n" + suffix,
-	}, nil); err != nil {
-		log.Printf("⚠️ editMessageText: %v", err)
-	}
-}
-
-func handleCallback(token, chatID, agentURL string, mailer ReplySender, cal *CalendarClient, cb *tgCallback) {
-	if cb.Message == nil {
-		answerCallback(token, cb.ID, "Сообщение слишком старое")
-		return
-	}
-
-	// Кнопки жмёт только твой чат, чужим — болт
-	if strconv.FormatInt(cb.Message.Chat.ID, 10) != chatID {
-		answerCallback(token, cb.ID, "Нет доступа")
-		return
-	}
-
-	action, idStr, _ := strings.Cut(cb.Data, ":")
-	uid64, err := strconv.ParseUint(idStr, 10, 32)
-	if err != nil {
-		answerCallback(token, cb.ID, "Кривые данные кнопки")
-		return
-	}
-	uid := uint32(uid64)
-
-	e, found := getEmail(uid)
-	if !found {
-		answerCallback(token, cb.ID, "Письмо не найдено в базе")
-		return
-	}
-
-	// Каждая кнопка работает только из своих статусов. Не тот статус — значит, уже нажимали.
-	switch action {
-	case "confirm":
-		if !transitionStatus(uid, "drafting", "pending") {
-			answerCallback(token, cb.ID, "Уже обработано: "+e.Status)
-			return
-		}
-		answerCallback(token, cb.ID, "✅ Пишу черновик…")
-		editMessage(token, cb, "✅ Подтверждено — пишу черновик…")
-		log.Printf("👆 UID %d → drafting", uid)
-		go draftAndSend(token, chatID, agentURL, e)
-
-	case "reject":
-		if !transitionStatus(uid, "rejected", "pending") {
-			answerCallback(token, cb.ID, "Уже обработано: "+e.Status)
-			return
-		}
-		answerCallback(token, cb.ID, "❌ Отклонено")
-		editMessage(token, cb, "❌ Отклонено")
-		log.Printf("👆 UID %d → rejected", uid)
-
-	case "redraft":
-		if !transitionStatus(uid, "drafting", "draft_ready", "draft_failed") {
-			answerCallback(token, cb.ID, "Сейчас нельзя: "+e.Status)
-			return
-		}
-		answerCallback(token, cb.ID, "🔄 Переписываю…")
-		editMessage(token, cb, "🔄 Переписываю…")
-		log.Printf("👆 UID %d → drafting (заново)", uid)
-		go draftAndSend(token, chatID, agentURL, e)
-
-	case "send":
-		if !transitionStatus(uid, "sending", "draft_ready") {
-			answerCallback(token, cb.ID, "Сейчас нельзя: "+e.Status)
-			return
-		}
-		answerCallback(token, cb.ID, "📤 Отправляю…")
-		editMessage(token, cb, "📤 Отправляю…")
-		log.Printf("👆 UID %d → sending", uid)
-		go sendAndReport(token, chatID, mailer, e)
-
-	case "skip":
-		if !transitionStatus(uid, "skipped", "draft_ready", "draft_failed") {
-			answerCallback(token, cb.ID, "Сейчас нельзя: "+e.Status)
-			return
-		}
-		answerCallback(token, cb.ID, "🙅 Не отвечаем")
-		editMessage(token, cb, "🙅 Не отвечаем")
-		log.Printf("👆 UID %d → skipped", uid)
-
-	case "cal":
-		if cal == nil {
-			answerCallback(token, cb.ID, "Календарь не настроен: нет CALENDAR_API_KEY в .env")
-			return
-		}
-		if !claimCalendarAdd(uid) {
-			answerCallback(token, cb.ID, "Уже в календаре")
-			return
-		}
-		answerCallback(token, cb.ID, "📅 Добавляю…")
-		log.Printf("👆 UID %d → в календарь", uid)
-		go addToCalendar(token, chatID, cal, e)
-
-	case "show":
-		answerCallback(token, cb.ID, "")
-
-		// Лимит Telegram — 4096 символов, поэтому тело режем
-		text := fmt.Sprintf("📄 Письмо UID %d\nОт: %s\nТема: %s\n\n%s",
-			e.UID, e.From, e.Subject, truncate(e.Body, 3500))
-		if err := sendTelegramMessage(token, chatID, text); err != nil {
-			log.Printf("⚠️ Не удалось показать письмо: %v", err)
-		}
-
-	default:
-		answerCallback(token, cb.ID, "Неизвестная кнопка")
-	}
-}
-
-// sendAndReport отправляет ответ по SMTP в своей горутине и пишет в Telegram, чем кончилось
-func sendAndReport(token, chatID string, mailer ReplySender, e StoredEmail) {
-	if err := mailer.SendReply(e); err != nil {
-		log.Printf("❌ Отправка UID %d: %v", e.UID, err)
-
-		// Откатываем в draft_ready, чтобы можно было нажать «Отправить» ещё раз
-		transitionStatus(e.UID, "draft_ready", "sending")
-
-		text := fmt.Sprintf("⚠️ Не удалось отправить ответ на «%s»:\n%v", e.Subject, err)
-		if err := sendWithKeyboard(token, chatID, text, [][]map[string]string{
-			{button("📤 Попробовать ещё", "send", e.UID), button("🙅 Не отвечать", "skip", e.UID)},
-		}); err != nil {
-			log.Printf("⚠️ Telegram: %v", err)
-		}
-		return
-	}
-
-	transitionStatus(e.UID, "sent", "sending")
-	log.Printf("📤 UID %d: ответ отправлен на %s", e.UID, e.From)
-
-	if err := sendTelegramMessage(token, chatID, fmt.Sprintf("✅ Ответ на «%s» отправлен → %s", e.Subject, e.From)); err != nil {
-		log.Printf("⚠️ Telegram: %v", err)
-	}
-}
-
-// draftAndSend крутится в своей горутине: агент думает до минуты,
-// а бот в это время должен дальше ловить другие кнопки
-func draftAndSend(token, chatID, agentURL string, e StoredEmail) {
-	resp, err := requestDraft(agentURL, e)
-	if err != nil {
-		log.Printf("❌ Черновик для UID %d: %v", e.UID, err)
-		updateEmailStatus(e.UID, "draft_failed")
-
-		if err := sendDraftFailed(token, chatID, e, err.Error()); err != nil {
-			log.Printf("⚠️ Telegram: %v (письмо найдётся через /pending)", err)
-		}
-		return
-	}
-
-	saveDraft(e.UID, resp)
-	if fresh, ok := getEmail(e.UID); ok {
-		e = fresh // вместе с черновиком подтянулись встреча и заметка из календаря
-	}
-	log.Printf("✍️ Черновик для UID %d готов (попыток: %d)", e.UID, resp.Attempts)
-	if resp.CalendarNote != "" {
-		log.Printf("📅 UID %d: %s", e.UID, resp.CalendarNote)
-	}
-
-	if err := sendDraftMessage(token, chatID, e, resp.Problems); err != nil {
-		log.Printf("⚠️ Не удалось отправить черновик в Telegram: %v (письмо найдётся через /pending)", err)
-	}
-}
-
-// sendDraftMessage — черновик с кнопками «Отправить / Переписать / Не отвечать»
 // sendDraftMessage — черновик с кнопками «Отправить / Переписать / Не отвечать»
 func sendDraftMessage(token, chatID string, e StoredEmail, problems string) error {
 	text := fmt.Sprintf("✍️ Черновик ответа\nКому: %s\nТема: Re: %s\n\n%s", e.From, e.Subject, e.Draft)
@@ -394,32 +151,13 @@ func sendDraftMessage(token, chatID string, e StoredEmail, problems string) erro
 	return sendWithKeyboard(token, chatID, text, rows)
 }
 
-// addToCalendar создаёт событие через calendar-mcp и сообщает, что вышло
-func addToCalendar(token, chatID string, cal *CalendarClient, e StoredEmail) {
-	created, err := cal.CreateEvent(context.Background(), e.MeetingTitle, e.MeetingStart, e.MeetingEnd,
-		fmt.Sprintf("Из письма от %s: %s", e.From, e.Subject))
-	if err != nil {
-		setCalendarEventID(e.UID, "") // отпускаем — можно нажать ещё раз
-		log.Printf("❌ В календарь UID %d: %v", e.UID, err)
-		if err := sendTelegramMessage(token, chatID, "⚠️ Не удалось добавить в календарь: "+err.Error()); err != nil {
-			log.Printf("⚠️ Telegram: %v", err)
-		}
-		return
-	}
+// sendDraftFailed — «черновик не получился» с кнопками «Повторить / Не отвечать»
+func sendDraftFailed(token, chatID string, e StoredEmail, reason string) error {
+	text := fmt.Sprintf("⚠️ Не получилось написать черновик для «%s»:\n%s", e.Subject, reason)
 
-	setCalendarEventID(e.UID, created.Event.ID)
-	log.Printf("📅 UID %d: событие %s создано", e.UID, created.Event.ID)
-
-	text := fmt.Sprintf("📅 Добавил в календарь: %s\n%s–%s", created.Event.Title, humanTime(created.Event.Start), shortTime(created.Event.End))
-	if len(created.Conflicts) > 0 {
-		text += "\n\n⚠️ Пересекается с:"
-		for _, c := range created.Conflicts {
-			text += fmt.Sprintf("\n• %s, %s–%s", c.Title, humanTime(c.Start), shortTime(c.End))
-		}
-	}
-	if err := sendTelegramMessage(token, chatID, text); err != nil {
-		log.Printf("⚠️ Telegram: %v", err)
-	}
+	return sendWithKeyboard(token, chatID, text, [][]map[string]string{
+		{button("🔄 Повторить", "redraft", e.UID), button("🙅 Не отвечать", "skip", e.UID)},
+	})
 }
 
 var weekdaysShortRU = [...]string{"вс", "пн", "вт", "ср", "чт", "пт", "сб"}
@@ -441,13 +179,16 @@ func shortTime(s string) string {
 	return s
 }
 
-// sendDraftFailed — «черновик не получился» с кнопками «Повторить / Не отвечать»
-func sendDraftFailed(token, chatID string, e StoredEmail, reason string) error {
-	text := fmt.Sprintf("⚠️ Не получилось написать черновик для «%s»:\n%s", e.Subject, reason)
-
-	return sendWithKeyboard(token, chatID, text, [][]map[string]string{
-		{button("🔄 Повторить", "redraft", e.UID), button("🙅 Не отвечать", "skip", e.UID)},
-	})
+type tgCallback struct {
+	ID      string `json:"id"`
+	Data    string `json:"data"`
+	Message *struct {
+		MessageID int64  `json:"message_id"`
+		Text      string `json:"text"`
+		Chat      struct {
+			ID int64 `json:"id"`
+		} `json:"chat"`
+	} `json:"message"`
 }
 
 type tgMessage struct {
@@ -457,9 +198,211 @@ type tgMessage struct {
 	} `json:"chat"`
 }
 
-// setBotCommands — команды появятся в меню бота (кнопка «/» слева от поля ввода)
-func setBotCommands(token string) {
-	if err := tgCall(token, "setMyCommands", map[string]any{
+type tgUpdate struct {
+	UpdateID      int64       `json:"update_id"`
+	CallbackQuery *tgCallback `json:"callback_query"`
+	Message       *tgMessage  `json:"message"`
+}
+
+// --- Бот ---
+
+// Bot — Telegram-интерфейс к действиям: переводит нажатия кнопок в вызовы App
+// и сообщает в чат, чем кончилась фоновая работа (реализует Notifier).
+type Bot struct {
+	Token  string
+	ChatID string
+	App    *App
+}
+
+// Run крутится в отдельной горутине и ловит нажатия кнопок и команды (long polling)
+func (b *Bot) Run() {
+	log.Println("🤖 Telegram-бот слушает кнопки")
+	b.setCommands()
+
+	var offset int64
+	for {
+		var updates []tgUpdate
+		err := tgCall(b.Token, "getUpdates", map[string]any{
+			"offset":          offset,
+			"timeout":         20,
+			"allowed_updates": []string{"callback_query", "message"},
+		}, &updates)
+		if err != nil {
+			log.Printf("⚠️ getUpdates: %v", err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		for _, u := range updates {
+			// offset = последний update_id + 1, иначе Telegram будет слать те же нажатия снова
+			offset = u.UpdateID + 1
+			if u.CallbackQuery != nil {
+				b.handleCallback(u.CallbackQuery)
+			}
+			if u.Message != nil {
+				b.handleCommand(u.Message)
+			}
+		}
+	}
+}
+
+func (b *Bot) send(text string) {
+	if err := sendTelegramMessage(b.Token, b.ChatID, text); err != nil {
+		log.Printf("⚠️ Telegram: %v", err)
+	}
+}
+
+func (b *Bot) answer(callbackID, text string) {
+	if err := tgCall(b.Token, "answerCallbackQuery", map[string]any{
+		"callback_query_id": callbackID,
+		"text":              text,
+	}, nil); err != nil {
+		log.Printf("⚠️ answerCallbackQuery: %v", err)
+	}
+}
+
+// editMessage дописывает строку к сообщению с кнопкой и убирает кнопки (нет reply_markup)
+func (b *Bot) editMessage(cb *tgCallback, suffix string) {
+	if err := tgCall(b.Token, "editMessageText", map[string]any{
+		"chat_id":    cb.Message.Chat.ID,
+		"message_id": cb.Message.MessageID,
+		"text":       cb.Message.Text + "\n\n" + suffix,
+	}, nil); err != nil {
+		log.Printf("⚠️ editMessageText: %v", err)
+	}
+}
+
+// buttonAction — что делает кнопка: действие App, всплывашка после нажатия и что дописать к сообщению
+type buttonAction struct {
+	do     func(uint32) (StoredEmail, error)
+	answer string
+	edit   string // пусто — сообщение не трогаем, кнопки остаются
+}
+
+func (b *Bot) handleCallback(cb *tgCallback) {
+	if cb.Message == nil {
+		b.answer(cb.ID, "Сообщение слишком старое")
+		return
+	}
+
+	// Кнопки жмёт только твой чат, чужим — болт
+	if strconv.FormatInt(cb.Message.Chat.ID, 10) != b.ChatID {
+		b.answer(cb.ID, "Нет доступа")
+		return
+	}
+
+	action, idStr, _ := strings.Cut(cb.Data, ":")
+	uid64, err := strconv.ParseUint(idStr, 10, 32)
+	if err != nil {
+		b.answer(cb.ID, "Кривые данные кнопки")
+		return
+	}
+	uid := uint32(uid64)
+
+	if action == "show" {
+		b.showEmail(cb, uid)
+		return
+	}
+
+	actions := map[string]buttonAction{
+		"confirm": {b.App.Confirm, "✅ Пишу черновик…", "✅ Подтверждено — пишу черновик…"},
+		"reject":  {b.App.Reject, "❌ Отклонено", "❌ Отклонено"},
+		"redraft": {b.App.Redraft, "🔄 Переписываю…", "🔄 Переписываю…"},
+		"send":    {b.App.Send, "📤 Отправляю…", "📤 Отправляю…"},
+		"skip":    {b.App.Skip, "🙅 Не отвечаем", "🙅 Не отвечаем"},
+		"cal":     {b.App.AddToCalendar, "📅 Добавляю…", ""},
+	}
+
+	ba, ok := actions[action]
+	if !ok {
+		b.answer(cb.ID, "Неизвестная кнопка")
+		return
+	}
+
+	// Правила (какой статус куда можно) живут в App — бот только показывает результат
+	if _, err := ba.do(uid); err != nil {
+		b.answer(cb.ID, buttonError(err))
+		return
+	}
+	b.answer(cb.ID, ba.answer)
+	if ba.edit != "" {
+		b.editMessage(cb, ba.edit)
+	}
+}
+
+// buttonError — короткий текст для всплывашки
+func buttonError(err error) string {
+	var wrong ErrWrongStatus
+	switch {
+	case errors.As(err, &wrong):
+		return "Уже обработано: " + wrong.Status
+	case errors.Is(err, ErrAlreadyInCalendar):
+		return "Уже в календаре"
+	default:
+		s := err.Error()
+		return strings.ToUpper(s[:1]) + s[1:]
+	}
+}
+
+func (b *Bot) showEmail(cb *tgCallback, uid uint32) {
+	e, found := getEmail(uid)
+	if !found {
+		b.answer(cb.ID, "Письмо не найдено в базе")
+		return
+	}
+	b.answer(cb.ID, "")
+
+	// Лимит Telegram — 4096 символов, поэтому тело режем
+	b.send(fmt.Sprintf("📄 Письмо UID %d\nОт: %s\nТема: %s\n\n%s", e.UID, e.From, e.Subject, truncate(e.Body, 3500)))
+}
+
+// --- Notifier: чем кончилась фоновая работа. Срабатывает и на кнопки, и на действия из приложения ---
+
+func (b *Bot) DraftReady(e StoredEmail, problems string) {
+	if err := sendDraftMessage(b.Token, b.ChatID, e, problems); err != nil {
+		log.Printf("⚠️ Не удалось отправить черновик в Telegram: %v (письмо найдётся через /pending)", err)
+	}
+}
+
+func (b *Bot) DraftFailed(e StoredEmail, reason string) {
+	if err := sendDraftFailed(b.Token, b.ChatID, e, reason); err != nil {
+		log.Printf("⚠️ Telegram: %v (письмо найдётся через /pending)", err)
+	}
+}
+
+func (b *Bot) Sent(e StoredEmail) {
+	b.send(fmt.Sprintf("✅ Ответ на «%s» отправлен → %s", e.Subject, e.From))
+}
+
+func (b *Bot) SendFailed(e StoredEmail, err error) {
+	text := fmt.Sprintf("⚠️ Не удалось отправить ответ на «%s»:\n%v", e.Subject, err)
+	if err := sendWithKeyboard(b.Token, b.ChatID, text, [][]map[string]string{
+		{button("📤 Попробовать ещё", "send", e.UID), button("🙅 Не отвечать", "skip", e.UID)},
+	}); err != nil {
+		log.Printf("⚠️ Telegram: %v", err)
+	}
+}
+
+func (b *Bot) CalendarAdded(e StoredEmail, created createdEvent) {
+	text := fmt.Sprintf("📅 Добавил в календарь: %s\n%s–%s", created.Event.Title, humanTime(created.Event.Start), shortTime(created.Event.End))
+	if len(created.Conflicts) > 0 {
+		text += "\n\n⚠️ Пересекается с:"
+		for _, c := range created.Conflicts {
+			text += fmt.Sprintf("\n• %s, %s–%s", c.Title, humanTime(c.Start), shortTime(c.End))
+		}
+	}
+	b.send(text)
+}
+
+func (b *Bot) CalendarFailed(e StoredEmail, err error) {
+	b.send("⚠️ Не удалось добавить в календарь: " + err.Error())
+}
+
+// --- Команды ---
+
+// setCommands — команды появятся в меню бота (кнопка «/» слева от поля ввода)
+func (b *Bot) setCommands() {
+	if err := tgCall(b.Token, "setMyCommands", map[string]any{
 		"commands": []map[string]string{
 			{"command": "pending", "description": "Письма, которые ждут решения"},
 		},
@@ -468,9 +411,9 @@ func setBotCommands(token string) {
 	}
 }
 
-func handleCommand(token, chatID string, m *tgMessage) {
+func (b *Bot) handleCommand(m *tgMessage) {
 	// Команды принимаем только из своего чата, остальных молча игнорим
-	if strconv.FormatInt(m.Chat.ID, 10) != chatID {
+	if strconv.FormatInt(m.Chat.ID, 10) != b.ChatID {
 		return
 	}
 
@@ -480,17 +423,15 @@ func handleCommand(token, chatID string, m *tgMessage) {
 	switch cmd {
 	case "/pending":
 		log.Println("📋 /pending")
-		sendPendingList(token, chatID)
+		b.sendPendingList()
 	case "/start", "/help":
-		if err := sendTelegramMessage(token, chatID, "Я ИИ-секретарь. Новые письма присылаю сам.\n/pending — письма, которые ждут твоего решения"); err != nil {
-			log.Printf("⚠️ Telegram: %v", err)
-		}
+		b.send("Я ИИ-секретарь. Новые письма присылаю сам.\n/pending — письма, которые ждут твоего решения")
 	}
 }
 
 // sendPendingList заново присылает все письма, где ход за тобой, — с живыми кнопками.
 // Старые сообщения по этим письмам не мешают: transitionStatus не даст нажать одно и то же дважды.
-func sendPendingList(token, chatID string) {
+func (b *Bot) sendPendingList() {
 	total := 0
 
 	for _, status := range []string{"pending", "draft_failed", "draft_ready"} {
@@ -505,11 +446,11 @@ func sendPendingList(token, chatID string) {
 			switch status {
 			case "pending":
 				d := EmailDecision{Urgency: e.Urgency, RequiresConfirmation: e.RequiresConfirmation, SuggestedAction: e.SuggestedAction, Suspicious: e.Suspicious, SuspicionReason: e.SuspicionReason}
-				err = sendEmailAlert(token, chatID, e.UID, buildTelegramAlert(e.From, e.Subject, d))
+				err = sendEmailAlert(b.Token, b.ChatID, e.UID, buildTelegramAlert(e.From, e.Subject, d))
 			case "draft_failed":
-				err = sendDraftFailed(token, chatID, e, "черновик так и не дописался")
+				err = sendDraftFailed(b.Token, b.ChatID, e, "черновик так и не дописался")
 			case "draft_ready":
-				err = sendDraftMessage(token, chatID, e, "")
+				err = sendDraftMessage(b.Token, b.ChatID, e, "")
 			}
 			if err != nil {
 				log.Printf("⚠️ /pending UID %d: %v", e.UID, err)
@@ -520,8 +461,6 @@ func sendPendingList(token, chatID string) {
 	}
 
 	if total == 0 {
-		if err := sendTelegramMessage(token, chatID, "🎉 Ничего не висит, всё разобрано"); err != nil {
-			log.Printf("⚠️ Telegram: %v", err)
-		}
+		b.send("🎉 Ничего не висит, всё разобрано")
 	}
 }
