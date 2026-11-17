@@ -4,4 +4,7 @@
          to allow setting breakpoints, to provide hot reload, etc.
     -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Шлюз пока на http:// без шифрования — разрешаем только в debug-сборке.
+         В релизе будет https после деплоя -->
+    <application android:usesCleartextTraffic="true"/>
 </manifest>
