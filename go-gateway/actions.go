@@ -31,6 +31,7 @@ type App struct {
 	Mailer   ReplySender
 	Calendar *CalendarClient
 	Notify   Notifier
+	Events   *EventHub // лента для приложения: смена статусов попадает туда сразу
 
 	wg sync.WaitGroup // фоновые задачи — чтобы тесты могли их дождаться
 }
@@ -66,7 +67,15 @@ func (a *App) transition(uid uint32, to string, from ...string) (StoredEmail, er
 
 	e, _ := getEmail(uid)
 	log.Printf("👆 UID %d → %s", uid, to)
+	a.statusChanged(e)
 	return e, nil
+}
+
+// statusChanged — сообщить приложению, что письмо поменялось (кнопка нажата здесь, в Telegram или с другого устройства)
+func (a *App) statusChanged(e StoredEmail) {
+	if a.Events != nil {
+		a.Events.StatusChanged(e)
+	}
 }
 
 // background запускает долгую работу, не задерживая ответ кнопке или API
@@ -154,6 +163,7 @@ func (a *App) EditDraft(uid uint32, text string) (StoredEmail, error) {
 
 	e, _ := getEmail(uid)
 	log.Printf("✏️ UID %d: черновик поправлен вручную", uid)
+	a.statusChanged(e)
 	return e, nil
 }
 

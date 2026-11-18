@@ -92,36 +92,39 @@ func main() {
 	if err != nil {
 		log.Fatalf("❌ Отправка почты не настроена: %v", err)
 	}
-	app := &App{AgentURL: getenvDefault("AGENT_URL", "http://127.0.0.1:8090"), Mailer: mailer}
+	// Лента событий для приложения: новые письма и результаты фоновой работы
+	events := NewEventHub(200)
+	app := &App{AgentURL: getenvDefault("AGENT_URL", "http://127.0.0.1:8090"), Mailer: mailer, Events: events}
 
 	// Календарь необязателен: нет ключа — «В календарь» ответит, что он не настроен
 	if key := os.Getenv("CALENDAR_API_KEY"); key != "" {
 		app.Calendar = &CalendarClient{URL: getenvDefault("CALENDAR_URL", "http://127.0.0.1:8095/mcp"), APIKey: key}
 	}
 
+	// Результаты фоновой работы — и в ленту приложения, и в Telegram (если он настроен).
 	// Бот подключаем до старта API: результаты действий из приложения тоже приходят в Telegram
+	notify := multiNotifier{events}
 	if cfg.TgToken != "" && cfg.TgChatID != "" {
 		bot := &Bot{Token: cfg.TgToken, ChatID: cfg.TgChatID, App: app}
-		app.Notify = bot
+		notify = append(notify, bot)
 		go bot.Run()
 	}
+	app.Notify = notify
 
 	// API_CORS_ORIGINS — с каких адресов браузеру можно ходить в API (Flutter Web), через запятую
 	go startAPI(getenvDefault("API_ADDR", "127.0.0.1:8080"), strings.Split(os.Getenv("API_CORS_ORIGINS"), ","), app)
 
-	
-
 	log.Printf("🚀 Шлюз запущен, проверяю почту каждые %s (Ctrl+C — стоп)", cfg.Interval)
 
 	for {
-		if err := checkMail(cfg); err != nil {
+		if err := checkMail(cfg, events); err != nil {
 			log.Printf("⚠️ Проверка почты упала: %v", err)
 		}
 		time.Sleep(cfg.Interval)
 	}
 }
 
-func checkMail(cfg Config) error {
+func checkMail(cfg Config, events *EventHub) error {
 	c, err := client.DialTLS(cfg.Addr, nil)
 	if err != nil {
 		return fmt.Errorf("подключение к %s: %w", cfg.Addr, err)
@@ -186,13 +189,13 @@ func checkMail(cfg Config) error {
 	}
 
 	for _, msg := range msgs {
-		processMessage(c, cfg, msg)
+		processMessage(c, cfg, msg, events)
 	}
 
 	return nil
 }
 
-func processMessage(c *client.Client, cfg Config, msg *imap.Message) {
+func processMessage(c *client.Client, cfg Config, msg *imap.Message, events *EventHub) {
 	if msg.Uid == 0 || msg.Envelope == nil {
 		return
 	}
@@ -248,7 +251,7 @@ func processMessage(c *client.Client, cfg Config, msg *imap.Message) {
 		fmt.Printf("🚨 Подозрительное: %s\n", decision.SuspicionReason)
 	}
 
-	saveEmail(StoredEmail{
+	stored := StoredEmail{
 		UID:                  msg.Uid,
 		From:                 from,
 		Subject:              subject,
@@ -260,7 +263,9 @@ func processMessage(c *client.Client, cfg Config, msg *imap.Message) {
 		Suspicious:           decision.Suspicious,
 		SuspicionReason:      decision.SuspicionReason,
 		Status:               "pending",
-	})
+	}
+	saveEmail(stored)
+	events.NewEmail(stored) // приложение покажет уведомление сразу
 
 	if shouldSendTelegramAlert(decision) {
 		if cfg.TgToken == "" || cfg.TgChatID == "" {

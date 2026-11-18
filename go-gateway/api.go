@@ -49,6 +49,9 @@ func newAPIHandler(corsOrigins []string, app *App) http.Handler {
 	mux.Handle("POST /api/emails/{uid}/draft", requireSession(act.editDraft))
 	mux.Handle("GET /api/calendar", requireSession(act.listCalendar))
 
+	// Лента событий: приложение узнаёт о новых письмах и результатах сразу, без перечитывания списка
+	mux.Handle("GET /api/events", requireSession(handleEvents(app.Events)))
+
 	return withCORS(corsOrigins, mux)
 }
 
