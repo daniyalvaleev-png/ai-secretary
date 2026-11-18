@@ -4,8 +4,10 @@ import 'package:material_ui/material_ui.dart';
 
 import '../api.dart';
 import '../models.dart';
+import '../ui.dart';
 
-/// Одно письмо: текст, черновик (можно поправить руками) и кнопки по статусу.
+/// Одно письмо: текст, совет секретаря, календарь, черновик (можно поправить руками)
+/// и кнопки внизу экрана — всегда под пальцем.
 /// Пока сервер пишет черновик или отправляет, экран сам перечитывает письмо раз в 2 секунды.
 class EmailScreen extends StatefulWidget {
   const EmailScreen({super.key, required this.api, required this.uid});
@@ -74,8 +76,11 @@ class _EmailScreenState extends State<EmailScreen> {
     }
   }
 
-  void _toast(String text) =>
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+  void _toast(String text) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(text)));
+  }
 
   Future<void> _run(Future<Email> Function() call) async {
     setState(() => _working = true);
@@ -89,16 +94,17 @@ class _EmailScreenState extends State<EmailScreen> {
     }
   }
 
+  void _act(String action) => _run(() => widget.api.action(widget.uid, action));
+
   bool get _draftEdited =>
       _email != null && _draft.text.trim() != _email!.draft.trim();
 
-  Future<void> _send() async {
-    final e = _email!;
+  Future<bool> _ask(String title, String text, String yes) async {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Отправить ответ?'),
-        content: Text('Кому: ${e.from}\n\n${_draft.text.trim()}'),
+        title: Text(title),
+        content: SingleChildScrollView(child: Text(text)),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
@@ -106,55 +112,50 @@ class _EmailScreenState extends State<EmailScreen> {
           ),
           FilledButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Отправить'),
+            child: Text(yes),
           ),
         ],
       ),
     );
-    if (ok != true) return;
+    return ok == true;
+  }
+
+  Future<void> _send() async {
+    final e = _email!;
+    final ok = await _ask(
+      'Отправить ответ?',
+      'Кому: ${e.from}\n\n${_draft.text.trim()}',
+      'Отправить',
+    );
+    if (!ok) return;
 
     await _run(() async {
       if (_draftEdited) {
-        await widget.api.editDraft(
-          e.uid,
-          _draft.text,
-        ); // сначала сохраняем правки — уйдёт именно исправленный текст
+        // Сначала сохраняем правки — уйдёт именно исправленный текст
+        await widget.api.editDraft(e.uid, _draft.text);
       }
       return widget.api.action(e.uid, 'send');
     });
   }
 
   Future<void> _redraft() async {
-    if (_draftEdited) {
-      final ok = await showDialog<bool>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text('Переписать черновик?'),
-          content: const Text(
-            'Твои правки пропадут — агент напишет новый вариант.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Отмена'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('Переписать'),
-            ),
-          ],
-        ),
-      );
-      if (ok != true) return;
+    if (_draftEdited &&
+        !await _ask(
+          'Переписать черновик?',
+          'Твои правки пропадут — агент напишет новый вариант.',
+          'Переписать',
+        )) {
+      return;
     }
-    await _run(() => widget.api.action(_email!.uid, 'redraft'));
+    _act('redraft');
   }
 
   Future<void> _addToCalendar() async {
-    await _run(() => widget.api.action(_email!.uid, 'calendar'));
+    await _run(() => widget.api.action(widget.uid, 'calendar'));
     if (!mounted) return;
     _toast('Добавляю в календарь…');
-    // Событие создаётся в фоне, а статус письма при этом не меняется — перечитаем сами, чтобы увидеть «Уже в календаре»
+    // Событие создаётся в фоне, а статус письма при этом не меняется —
+    // перечитаем сами, чтобы увидеть «Уже в календаре»
     Future.delayed(const Duration(seconds: 2), () {
       if (mounted) _load();
     });
@@ -164,46 +165,108 @@ class _EmailScreenState extends State<EmailScreen> {
   Widget build(BuildContext context) {
     final e = _email;
     return Scaffold(
-      appBar: AppBar(title: Text(e?.subject ?? 'Письмо')),
+      appBar: AppBar(),
       body: e == null
           ? Center(
               child: _error != null
-                  ? Text(_error!)
+                  ? EmptyState(
+                      icon: Icons.cloud_off,
+                      title: _error!,
+                      action: TextButton(
+                        onPressed: _load,
+                        child: const Text('Повторить'),
+                      ),
+                    )
                   : const CircularProgressIndicator(),
             )
           : ListView(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
               children: [
                 _header(e),
-                if (e.suspicious) _suspiciousBanner(e),
+                if (e.suspicious) ...[
+                  const SizedBox(height: 12),
+                  _suspiciousBanner(e),
+                ],
                 const SizedBox(height: 12),
-                _section('Письмо', SelectableText(e.body.trim())),
-                if (e.suggestedAction.isNotEmpty)
-                  _section('Что советует секретарь', Text(e.suggestedAction)),
-                if (e.calendarNote.isNotEmpty || e.meetingStart.isNotEmpty)
+                SectionCard(
+                  icon: Icons.mail_outline,
+                  title: 'Письмо',
+                  child: SelectableText(
+                    e.body.trim().isEmpty ? '(пустое письмо)' : e.body.trim(),
+                    style: Theme.of(context).textTheme.bodyLarge
+                        ?.copyWith(height: 1.4),
+                  ),
+                ),
+                if (e.suggestedAction.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  SectionCard(
+                    icon: Icons.auto_awesome,
+                    title: 'Секретарь советует',
+                    child: Text(e.suggestedAction),
+                  ),
+                ],
+                if (e.calendarNote.isNotEmpty || e.meetingStart.isNotEmpty) ...[
+                  const SizedBox(height: 12),
                   _calendar(e),
-                if (e.draft.isNotEmpty || e.status == 'draft_ready')
+                ],
+                if (e.draft.isNotEmpty || e.status == 'draft_ready') ...[
+                  const SizedBox(height: 12),
                   _draftEditor(e),
-                const SizedBox(height: 16),
-                _actions(e),
+                ],
               ],
             ),
+      bottomNavigationBar: e == null ? null : _actions(e),
     );
   }
 
   Widget _header(Email e) {
     final theme = Theme.of(context);
+    final s = theme.colorScheme;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(e.from, style: theme.textTheme.titleMedium),
-        const SizedBox(height: 4),
+        Text(
+          e.subject.isEmpty ? '(без темы)' : e.subject,
+          style: theme.textTheme.headlineSmall?.copyWith(
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const SizedBox(height: 8),
         Wrap(
-          spacing: 8,
+          spacing: 6,
+          runSpacing: 6,
           children: [
-            Chip(label: Text(statusLabels[e.status] ?? e.status)),
-            if (e.urgency.isNotEmpty)
-              Chip(label: Text('Срочность: ${e.urgency}')),
+            StatusPill(e.status),
+            if (e.urgency == 'высокая') const UrgentPill(),
+          ],
+        ),
+        const SizedBox(height: 14),
+        Row(
+          children: [
+            SenderAvatar(from: e.from, suspicious: e.suspicious, size: 40),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    senderName(e.from),
+                    style: theme.textTheme.titleSmall?.copyWith(
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  Text(
+                    [
+                      senderAddress(e.from),
+                      if (e.receivedAt != null) fullDate(e.receivedAt),
+                    ].join(' · '),
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: s.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ],
         ),
       ],
@@ -211,148 +274,260 @@ class _EmailScreenState extends State<EmailScreen> {
   }
 
   Widget _suspiciousBanner(Email e) {
-    final scheme = Theme.of(context).colorScheme;
-    return Card(
-      color: scheme.errorContainer,
-      child: ListTile(
-        leading: Icon(Icons.gpp_maybe, color: scheme.onErrorContainer),
-        title: Text(
-          'Похоже на мошенничество',
-          style: TextStyle(color: scheme.onErrorContainer),
-        ),
-        subtitle: Text(
-          '${e.suspicionReason}\nНе переходи по ссылкам и ничего не отправляй, пока не проверишь.',
-          style: TextStyle(color: scheme.onErrorContainer),
-        ),
+    final s = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: s.errorContainer,
+        borderRadius: BorderRadius.circular(18),
       ),
-    );
-  }
-
-  Widget _section(String title, Widget child) {
-    return Padding(
-      padding: const EdgeInsets.only(top: 12),
-      child: Column(
+      child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(title, style: Theme.of(context).textTheme.labelLarge),
-          const SizedBox(height: 4),
-          child,
+          Icon(Icons.gpp_maybe, color: s.onErrorContainer),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Похоже на мошенничество',
+                  style: TextStyle(
+                    color: s.onErrorContainer,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  [
+                    if (e.suspicionReason.isNotEmpty) e.suspicionReason,
+                    'Не переходи по ссылкам и ничего не отправляй, пока не проверишь.',
+                  ].join('\n'),
+                  style: TextStyle(color: s.onErrorContainer),
+                ),
+              ],
+            ),
+          ),
         ],
       ),
     );
   }
 
   Widget _calendar(Email e) {
-    return _section(
-      'Календарь',
-      Text(
-        [
-          if (e.calendarNote.isNotEmpty) e.calendarNote,
-          if (e.meetingStart.isNotEmpty)
-            '📅 ${e.meetingTitle}: ${e.meetingStart}–${e.meetingEnd.length >= 16 ? e.meetingEnd.substring(11) : e.meetingEnd}',
-          if (e.calendarEventId.isNotEmpty) '✅ Уже в календаре',
-        ].join('\n'),
+    final theme = Theme.of(context);
+    final s = theme.colorScheme;
+    final start = parseLocal(e.meetingStart);
+    final end = parseLocal(e.meetingEnd);
+    final inCalendar = e.calendarEventId.isNotEmpty;
+
+    return SectionCard(
+      icon: Icons.event_outlined,
+      title: 'Календарь',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (start != null)
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: s.primaryContainer.withValues(alpha: 0.5),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.schedule, color: s.primary, size: 20),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          e.meetingTitle.isEmpty ? 'Встреча' : e.meetingTitle,
+                          style: const TextStyle(fontWeight: FontWeight.w600),
+                        ),
+                        Text(
+                          '${dayTitle(start)}, ${hhmm(start)}'
+                          '${end != null ? '–${hhmm(end)}' : ''}',
+                          style: theme.textTheme.bodySmall,
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (inCalendar)
+                    Icon(Icons.check_circle, color: s.primary, size: 22),
+                ],
+              ),
+            ),
+          if (e.calendarNote.isNotEmpty) ...[
+            if (start != null) const SizedBox(height: 10),
+            Text(e.calendarNote),
+          ],
+          if (inCalendar) ...[
+            const SizedBox(height: 8),
+            Text(
+              '✅ Уже в календаре',
+              style: TextStyle(color: s.primary, fontWeight: FontWeight.w600),
+            ),
+          ] else if (e.canAddToCalendar) ...[
+            const SizedBox(height: 12),
+            FilledButton.tonalIcon(
+              onPressed: _working ? null : _addToCalendar,
+              icon: const Icon(Icons.event_available),
+              label: const Text('В календарь'),
+            ),
+          ],
+        ],
       ),
     );
   }
 
   Widget _draftEditor(Email e) {
     final editable = e.status == 'draft_ready' && !_working;
-    return _section(
-      'Черновик ответа',
-      TextField(
+    return SectionCard(
+      icon: Icons.edit_note,
+      title: 'Черновик ответа',
+      child: TextField(
         controller: _draft,
         enabled: editable,
         maxLines: null,
-        minLines: 3,
+        minLines: 4,
+        style: Theme.of(context).textTheme.bodyLarge?.copyWith(height: 1.4),
         decoration: InputDecoration(
-          border: const OutlineInputBorder(),
           helperText: editable ? 'Можно поправить перед отправкой' : null,
         ),
-        onChanged: (_) =>
-            setState(() {}), // чтобы кнопки знали, что черновик правили
+        // чтобы кнопки знали, что черновик правили
+        onChanged: (_) => setState(() {}),
       ),
     );
   }
 
-  Widget _actions(Email e) {
-    if (e.busy) {
-      return Row(
-        children: [
-          const SizedBox(
-            width: 20,
-            height: 20,
-            child: CircularProgressIndicator(strokeWidth: 2),
+  /// Нижняя панель: что можно сделать с письмом в его текущем статусе
+  Widget? _actions(Email e) {
+    final s = Theme.of(context).colorScheme;
+
+    Widget bar(List<Widget> children) => Material(
+      color: Theme.of(context).cardTheme.color,
+      child: SafeArea(
+        top: false,
+        child: Container(
+          decoration: BoxDecoration(
+            border: Border(
+              top: BorderSide(color: s.outlineVariant.withValues(alpha: 0.4)),
+            ),
           ),
-          const SizedBox(width: 12),
-          Text(statusLabels[e.status] ?? e.status),
-        ],
-      );
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+          child: AbsorbPointer(
+            absorbing:
+                _working, // пока ждём ответ — кнопки не жмутся второй раз
+            child: AnimatedOpacity(
+              duration: const Duration(milliseconds: 150),
+              opacity: _working ? 0.5 : 1,
+              child: Row(children: children),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    const gap = SizedBox(width: 10);
+
+    if (e.busy) {
+      return bar([
+        const SizedBox(
+          width: 20,
+          height: 20,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+        const SizedBox(width: 12),
+        Expanded(child: Text(statusLabel(e.status))),
+      ]);
     }
 
-    final buttons = <Widget>[
-      if (e.status == 'pending' && !e.suspicious) ...[
-        FilledButton.icon(
-          icon: const Icon(Icons.edit_note),
-          label: const Text('Подтвердить'),
-          onPressed: () => _run(() => widget.api.action(e.uid, 'confirm')),
+    return switch (e.status) {
+      'pending' when e.suspicious => bar([
+        // Главная кнопка — «Отклонить», чтобы не подтвердить мошенника по привычке
+        Expanded(
+          child: TextButton(
+            onPressed: () => _act('confirm'),
+            child: const Text('Всё равно ответить'),
+          ),
         ),
-        OutlinedButton.icon(
-          icon: const Icon(Icons.close),
-          label: const Text('Отклонить'),
-          onPressed: () => _run(() => widget.api.action(e.uid, 'reject')),
+        gap,
+        Expanded(
+          child: FilledButton.icon(
+            icon: const Icon(Icons.close),
+            label: const Text('Отклонить'),
+            onPressed: () => _act('reject'),
+          ),
         ),
-      ],
-      // Подозрительное: главная кнопка — «Отклонить», чтобы не подтвердить мошенника по привычке
-      if (e.status == 'pending' && e.suspicious) ...[
-        FilledButton.icon(
-          icon: const Icon(Icons.close),
-          label: const Text('Отклонить'),
-          onPressed: () => _run(() => widget.api.action(e.uid, 'reject')),
+      ]),
+      'pending' => bar([
+        Expanded(
+          child: OutlinedButton.icon(
+            icon: const Icon(Icons.close),
+            label: const Text('Отклонить'),
+            onPressed: () => _act('reject'),
+          ),
         ),
-        TextButton(
-          onPressed: () => _run(() => widget.api.action(e.uid, 'confirm')),
-          child: const Text('Всё равно ответить'),
+        gap,
+        Expanded(
+          child: FilledButton.icon(
+            icon: const Icon(Icons.edit_note),
+            label: const Text('Подтвердить'),
+            onPressed: () => _act('confirm'),
+          ),
         ),
-      ],
-      if (e.status == 'draft_ready') ...[
-        FilledButton.icon(
-          icon: const Icon(Icons.send),
-          label: const Text('Отправить'),
-          onPressed: _draft.text.trim().isEmpty ? null : _send,
+      ]),
+      'draft_ready' => bar([
+        _moreMenu(),
+        Expanded(
+          child: OutlinedButton(
+            onPressed: _redraft,
+            child: const Text('Переписать'),
+          ),
         ),
-        OutlinedButton.icon(
-          icon: const Icon(Icons.refresh),
-          label: const Text('Переписать'),
-          onPressed: _redraft,
+        gap,
+        Expanded(
+          child: FilledButton.icon(
+            icon: const Icon(Icons.send),
+            label: const Text('Отправить'),
+            onPressed: _draft.text.trim().isEmpty ? null : _send,
+          ),
         ),
-      ],
-      if (e.status == 'draft_failed')
-        FilledButton.icon(
-          icon: const Icon(Icons.refresh),
-          label: const Text('Повторить'),
-          onPressed: () => _run(() => widget.api.action(e.uid, 'redraft')),
+      ]),
+      'draft_failed' => bar([
+        Expanded(
+          child: OutlinedButton(
+            onPressed: () => _act('skip'),
+            child: const Text('Не отвечать'),
+          ),
         ),
-      if (e.status == 'draft_ready' || e.status == 'draft_failed')
-        TextButton(
-          onPressed: () => _run(() => widget.api.action(e.uid, 'skip')),
-          child: const Text('Не отвечать'),
+        gap,
+        Expanded(
+          child: FilledButton.icon(
+            icon: const Icon(Icons.refresh),
+            label: const Text('Повторить'),
+            onPressed: () => _act('redraft'),
+          ),
         ),
-      if (e.canAddToCalendar)
-        OutlinedButton.icon(
-          icon: const Icon(Icons.event),
-          label: const Text('В календарь'),
-          onPressed: _addToCalendar,
-        ),
-    ];
-
-    if (buttons.isEmpty) return const SizedBox.shrink();
-    return AbsorbPointer(
-      absorbing: _working, // пока ждём ответ — кнопки не жмутся второй раз
-      child: Opacity(
-        opacity: _working ? 0.5 : 1,
-        child: Wrap(spacing: 8, runSpacing: 8, children: buttons),
-      ),
-    );
+      ]),
+      _ => null, // письмо закрыто — делать нечего
+    };
   }
+
+  Widget _moreMenu() => PopupMenuButton<String>(
+    tooltip: 'Ещё',
+    icon: const Icon(Icons.more_vert),
+    onSelected: _act,
+    itemBuilder: (_) => const [
+      PopupMenuItem(
+        value: 'skip',
+        child: ListTile(
+          leading: Icon(Icons.do_not_disturb_on_outlined),
+          title: Text('Не отвечать'),
+          contentPadding: EdgeInsets.zero,
+        ),
+      ),
+    ],
+  );
 }

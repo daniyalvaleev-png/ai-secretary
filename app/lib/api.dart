@@ -27,8 +27,20 @@ class ApiClient {
     : _http = httpClient ?? http.Client();
 
   final http.Client _http;
-  final String baseUrl;
+
+  /// Адрес шлюза; можно поменять на экране входа (например, на адрес компа в Wi-Fi)
+  String baseUrl;
   String? token;
+
+  /// «192.168.0.10:8080/» → «http://192.168.0.10:8080»
+  static String normalizeUrl(String s) {
+    var u = s.trim();
+    while (u.endsWith('/')) {
+      u = u.substring(0, u.length - 1);
+    }
+    if (u.isNotEmpty && !u.contains('://')) u = 'http://$u';
+    return u;
+  }
 
   /// Вызывается, когда сервер ответил 401: сессия протухла или её закрыли — надо на экран входа
   void Function()? onUnauthorized;

@@ -6,11 +6,13 @@ import 'package:http/testing.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:secretary_app/api.dart';
 import 'package:secretary_app/main.dart';
+import 'package:secretary_app/ui.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Поддельный шлюз: хранит письма в памяти и отвечает так же, как настоящий
 class FakeGateway {
   final requests = <String>[];
+  final hosts = <String>[];
   bool failSend = false;
   final emails = <int, Map<String, dynamic>>{
     7: {
@@ -52,6 +54,7 @@ class FakeGateway {
   late final client = MockClient((req) async {
     final path = req.url.path;
     requests.add('${req.method} $path');
+    hosts.add('${req.url.host}:${req.url.port}');
 
     if (path == '/api/login') {
       final b = jsonDecode(req.body);
@@ -227,6 +230,51 @@ void main() {
     expect(find.text('Похоже на мошенничество'), findsOneWidget);
     expect(find.widgetWithText(FilledButton, 'Отклонить'), findsOneWidget);
     expect(find.text('Подтвердить'), findsNothing);
+  });
+
+  testWidgets('адрес сервера с экрана входа запоминается', (tester) async {
+    final gw = FakeGateway();
+    await tester.pumpWidget(
+      SecretaryApp(
+        api: ApiClient(httpClient: gw.client, baseUrl: 'http://gw'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.textContaining('Сервер:'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Адрес сервера'),
+      '192.168.0.10:8080/',
+    );
+    await tester.enterText(find.widgetWithText(TextField, 'Логин'), 'daniyal');
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Пароль'),
+      'secret-password',
+    );
+    await tester.tap(find.text('Войти'));
+    await tester.pumpAndSettle();
+
+    expect(gw.hosts.first, '192.168.0.10:8080');
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getString('server_url'), 'http://192.168.0.10:8080');
+    expect(find.text('Входящие'), findsOneWidget);
+  });
+
+  test('даты по-русски', () {
+    final now = DateTime(2026, 11, 18, 15, 0);
+    expect(shortDate(DateTime(2026, 11, 18, 14, 55), now: now), '5 мин');
+    expect(shortDate(DateTime(2026, 11, 18, 9, 5), now: now), '09:05');
+    expect(shortDate(DateTime(2026, 11, 17, 23, 0), now: now), 'вчера');
+    expect(shortDate(DateTime(2026, 3, 8, 12, 0), now: now), '8 марта');
+    expect(
+      fullDate(DateTime(2026, 11, 2, 9, 30), now: now),
+      '2 ноября в 09:30',
+    );
+    expect(dayTitle(DateTime(2026, 11, 19), now: now), 'Завтра, 19 ноября');
+    expect(dayTitle(DateTime(2026, 11, 20), now: now), 'Пятница, 20 ноября');
+    expect(senderName('"Иван Петров" <ivan@mail.ru>'), 'Иван Петров');
+    expect(senderName('friend@mail.ru'), 'friend');
   });
 
   testWidgets('сессия протухла — назад на экран входа', (tester) async {

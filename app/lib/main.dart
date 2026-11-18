@@ -4,10 +4,12 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'api.dart';
 import 'screens/emails_screen.dart';
 import 'screens/login_screen.dart';
+import 'ui.dart';
 
 void main() => runApp(SecretaryApp(api: ApiClient()));
 
 const _tokenKey = 'session_token';
+const _serverKey = 'server_url';
 
 /// Корень приложения: помнит, вошёл ли пользователь, и показывает вход или почту
 class SecretaryApp extends StatefulWidget {
@@ -31,9 +33,12 @@ class _SecretaryAppState extends State<SecretaryApp> {
     _restoreSession();
   }
 
-  /// Токен хранится между запусками (в вебе — в localStorage браузера), чтобы не входить каждый раз
+  /// Токен и адрес сервера хранятся между запусками (в вебе — в localStorage браузера)
   Future<void> _restoreSession() async {
     final prefs = await SharedPreferences.getInstance();
+    final server = prefs.getString(_serverKey);
+    if (server != null && server.isNotEmpty) widget.api.baseUrl = server;
+
     final saved = prefs.getString(_tokenKey);
     String? login;
     if (saved != null) {
@@ -56,6 +61,7 @@ class _SecretaryAppState extends State<SecretaryApp> {
   Future<void> _onLoggedIn(String login) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_tokenKey, widget.api.token!);
+    await prefs.setString(_serverKey, widget.api.baseUrl);
     setState(() => _login = login);
   }
 
@@ -95,7 +101,24 @@ class _SecretaryAppState extends State<SecretaryApp> {
       title: 'ИИ-секретарь',
       navigatorKey: _navigator,
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(colorScheme: .fromSeed(seedColor: Colors.indigo)),
+      theme: buildTheme(Brightness.light),
+      darkTheme: buildTheme(Brightness.dark),
+      themeMode:
+          ThemeMode.system, // тёмная тема — если она включена на телефоне/компе
+      // Системные надписи (Копировать, Вставить, Назад…) — по-русски
+      locale: const Locale('ru'),
+      supportedLocales: const [Locale('ru')],
+      localizationsDelegates: GlobalMaterialLocalizations.delegates,
+      // На широком экране (браузер на компе) не растягиваем всё на всю ширину
+      builder: (context, child) => ColoredBox(
+        color: Theme.of(context).scaffoldBackgroundColor,
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 760),
+            child: child,
+          ),
+        ),
+      ),
       home: home,
     );
   }

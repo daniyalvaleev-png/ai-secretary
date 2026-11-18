@@ -87,18 +87,3 @@ class CalendarEvent {
   final String end;
   final String weekday;
 }
-
-/// Статусы письма по-человечески
-const statusLabels = {
-  'pending': 'Ждёт решения',
-  'drafting': 'Пишу черновик…',
-  'draft_ready': 'Черновик готов',
-  'draft_failed': 'Черновик не вышел',
-  'sending': 'Отправляю…',
-  'sent': 'Отправлено',
-  'rejected': 'Отклонено',
-  'skipped': 'Без ответа',
-  'confirmed': 'Подтверждено',
-  'done': 'Готово',
-  'approved': 'Одобрено',
-};
