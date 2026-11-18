@@ -87,3 +87,40 @@ class CalendarEvent {
   final String end;
   final String weekday;
 }
+
+/// Событие из ленты GET /api/events: «пришло письмо», «черновик готов», «отправлено»…
+class AppEvent {
+  AppEvent({
+    required this.id,
+    required this.type,
+    required this.uid,
+    this.from = '',
+    this.subject = '',
+    this.status = '',
+    this.text = '',
+    this.important = false,
+  });
+
+  /// Шлюз перезапускался, часть событий могла потеряться — надо просто перечитать список
+  AppEvent.resync() : this(id: 0, type: 'resync', uid: 0);
+
+  factory AppEvent.fromJson(Map<String, dynamic> j) => AppEvent(
+    id: (j['id'] as num).toInt(),
+    type: j['type'] as String? ?? '',
+    uid: (j['uid'] as num? ?? 0).toInt(),
+    from: j['from'] as String? ?? '',
+    subject: j['subject'] as String? ?? '',
+    status: j['status'] as String? ?? '',
+    text: j['text'] as String? ?? '',
+    important: j['important'] as bool? ?? false,
+  );
+
+  final int id;
+  final String type; // new_email, status, draft_ready, draft_failed, sent, send_failed, calendar_added, calendar_failed
+  final int uid;
+  final String from;
+  final String subject;
+  final String status;
+  final String text; // готовая фраза для уведомления; пусто — показывать нечего
+  final bool important; // стоит показать системное уведомление
+}

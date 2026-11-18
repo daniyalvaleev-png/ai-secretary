@@ -3,17 +3,25 @@ import 'dart:async';
 import 'package:material_ui/material_ui.dart';
 
 import '../api.dart';
+import '../live.dart';
 import '../models.dart';
 import '../ui.dart';
 
 /// Одно письмо: текст, совет секретаря, календарь, черновик (можно поправить руками)
 /// и кнопки внизу экрана — всегда под пальцем.
-/// Пока сервер пишет черновик или отправляет, экран сам перечитывает письмо раз в 2 секунды.
+/// Обновляется само: по ленте событий (если она есть) и раз в 2 секунды, пока сервер
+/// пишет черновик или отправляет.
 class EmailScreen extends StatefulWidget {
-  const EmailScreen({super.key, required this.api, required this.uid});
+  const EmailScreen({
+    super.key,
+    required this.api,
+    required this.uid,
+    this.live,
+  });
 
   final ApiClient api;
   final int uid;
+  final LiveUpdates? live;
 
   @override
   State<EmailScreen> createState() => _EmailScreenState();
@@ -25,16 +33,22 @@ class _EmailScreenState extends State<EmailScreen> {
   String? _error;
   bool _working = false; // ждём ответа на нажатую кнопку
   Timer? _poll;
+  StreamSubscription<AppEvent>? _events;
 
   @override
   void initState() {
     super.initState();
     _load();
+    // Письмо поменялось (черновик готов, нажали кнопку в Telegram…) — перечитываем сразу
+    _events = widget.live?.stream.listen((e) {
+      if (e.uid == widget.uid || e.type == 'resync') _load();
+    });
   }
 
   @override
   void dispose() {
     _poll?.cancel();
+    _events?.cancel();
     _draft.dispose();
     super.dispose();
   }

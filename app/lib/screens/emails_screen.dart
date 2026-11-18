@@ -3,12 +3,16 @@ import 'dart:async';
 import 'package:material_ui/material_ui.dart';
 
 import '../api.dart';
+import '../live.dart';
 import '../models.dart';
+import '../notifications.dart';
 import '../ui.dart';
 import 'calendar_screen.dart';
 import 'email_screen.dart';
 
-/// Входящие: «ждут решения» или все, поиск. Сами обновляются раз в 15 секунд.
+/// Входящие: «ждут решения» или все, поиск.
+/// Слушает ленту событий шлюза: новое письмо появляется сразу, а если приложение свёрнуто —
+/// приходит системное уведомление.
 class EmailsScreen extends StatefulWidget {
   const EmailsScreen({
     super.key,
@@ -32,19 +36,82 @@ class _EmailsScreenState extends State<EmailsScreen> {
   bool _loading = true;
   String? _error;
   Timer? _timer;
+  Timer? _reloadSoon;
+
+  late final _live = LiveUpdates(widget.api);
+  StreamSubscription<AppEvent>? _events;
+  late final AppLifecycleListener _lifecycle;
+  bool _foreground = true; // приложение на экране, а не свёрнуто
+  int?
+  _openedUid; // какое письмо сейчас открыто — про него экран письма скажет сам
+
+  final _notifications = SystemNotifications.instance;
 
   @override
   void initState() {
     super.initState();
     _load();
-    _timer = Timer.periodic(const Duration(seconds: 15), (_) => _load());
+    // Лента событий — основной способ узнать о новом. Таймер — подстраховка, если она отвалилась
+    _timer = Timer.periodic(const Duration(seconds: 60), (_) => _load());
+    _events = _live.stream.listen(_onEvent);
+    _live.start();
+
+    _lifecycle = AppLifecycleListener(
+      onStateChange: (s) {
+        final was = _foreground;
+        _foreground = s == AppLifecycleState.resumed;
+        // Вернулись в приложение — освежить список
+        if (_foreground && !was) _load();
+      },
+    );
+
+    _notifications.onTap = _openUid;
+    // После init в браузере может появиться кнопка «Включить уведомления»
+    _notifications.init().then((_) {
+      if (mounted) setState(() {});
+    });
   }
 
   @override
   void dispose() {
     _timer?.cancel();
+    _reloadSoon?.cancel();
+    _events?.cancel();
+    _live.dispose();
+    _lifecycle.dispose();
+    _notifications.onTap = null;
     _search.dispose();
     super.dispose();
+  }
+
+  void _onEvent(AppEvent e) {
+    // Несколько событий подряд — перечитаем список один раз
+    _reloadSoon?.cancel();
+    _reloadSoon = Timer(const Duration(milliseconds: 300), _load);
+
+    if (e.text.isEmpty) return;
+    if (!_foreground) {
+      if (e.important) _notifications.show(e);
+      return;
+    }
+    // Приложение открыто: плашка внизу. Про открытое письмо экран письма скажет сам
+    if (e.uid == _openedUid) return;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(
+          [e.text, if (e.subject.isNotEmpty) '«${e.subject}»'].join('\n'),
+        ),
+        duration: const Duration(seconds: 5),
+        action: e.uid == 0 || _openedUid != null
+            ? null
+            : SnackBarAction(
+                label: 'Открыть',
+                onPressed: () => _openUid(e.uid),
+              ),
+      ),
+    );
   }
 
   Future<void> _load() async {
@@ -62,12 +129,20 @@ class _EmailsScreenState extends State<EmailsScreen> {
     }
   }
 
-  Future<void> _open(Email e) async {
-    await Navigator.of(context).push(
+  void _open(Email e) => _openUid(e.uid);
+
+  Future<void> _openUid(int uid) async {
+    if (!mounted) return;
+    final nav = Navigator.of(context);
+    // Нажали уведомление, когда открыт другой экран, — возвращаемся к списку и открываем нужное
+    nav.popUntil((r) => r.isFirst);
+    _openedUid = uid;
+    await nav.push(
       MaterialPageRoute(
-        builder: (_) => EmailScreen(api: widget.api, uid: e.uid),
+        builder: (_) => EmailScreen(api: widget.api, uid: uid, live: _live),
       ),
     );
+    if (_openedUid == uid) _openedUid = null;
     _load(); // вернулись — статус письма мог поменяться
   }
 
@@ -112,6 +187,16 @@ class _EmailsScreenState extends State<EmailsScreen> {
       appBar: AppBar(
         title: const Text('Входящие'),
         actions: [
+          // В браузере уведомления можно разрешить только по нажатию — даём кнопку
+          if (_notifications.needsPermission)
+            IconButton(
+              tooltip: 'Включить уведомления',
+              icon: const Icon(Icons.notifications_active_outlined),
+              onPressed: () async {
+                await _notifications.askPermission();
+                if (mounted) setState(() {});
+              },
+            ),
           IconButton(
             tooltip: 'Календарь',
             icon: const Icon(Icons.calendar_month_outlined),

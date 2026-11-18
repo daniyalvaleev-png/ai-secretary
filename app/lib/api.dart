@@ -124,6 +124,21 @@ class ApiClient {
     await _send('POST', '/api/emails/$uid/draft', body: {'draft': draft}),
   );
 
+  // --- Лента событий ---
+
+  /// События после [after]. Если новых нет, сервер держит запрос до 25 секунд (long polling).
+  /// Без [after] — сразу отвечает номером последнего события: с него и начинаем слушать.
+  Future<(List<AppEvent>, int)> events({int? after}) async {
+    final data = await _send(
+      'GET',
+      after == null ? '/api/events' : '/api/events?after=$after',
+    );
+    final events = (data['events'] as List)
+        .map((e) => AppEvent.fromJson(e as Map<String, dynamic>))
+        .toList();
+    return (events, (data['last_id'] as num).toInt());
+  }
+
   // --- Календарь ---
 
   Future<List<CalendarEvent>> calendar() async {

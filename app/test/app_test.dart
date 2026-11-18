@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -14,6 +15,18 @@ class FakeGateway {
   final requests = <String>[];
   final hosts = <String>[];
   bool failSend = false;
+
+  // Лента событий: запрос «что нового?» висит, пока тест не вызовет push — как настоящий long polling
+  final _events = <Map<String, dynamic>>[];
+  int _lastEventId = 0;
+  Completer<void>? _eventWaiter;
+
+  void push(Map<String, dynamic> event) {
+    _events.add({...event, 'id': ++_lastEventId});
+    _eventWaiter?.complete();
+    _eventWaiter = null;
+  }
+
   final emails = <int, Map<String, dynamic>>{
     7: {
       'uid': 7,
@@ -66,6 +79,17 @@ class FakeGateway {
       return _json({'error': 'нужно войти'}, 401);
     }
     if (path == '/api/me') return _json({'login': 'daniyal'});
+    if (path == '/api/events') {
+      final after = int.tryParse(req.url.queryParameters['after'] ?? '');
+      if (after == null) return _json({'events': [], 'last_id': _lastEventId});
+      if (!_events.any((e) => e['id'] > after)) {
+        await (_eventWaiter ??= Completer<void>()).future;
+      }
+      return _json({
+        'events': _events.where((e) => e['id'] > after).toList(),
+        'last_id': _lastEventId,
+      });
+    }
     if (path == '/api/emails') return _json(emails.values.toList());
 
     final m = RegExp(r'^/api/emails/(\d+)(?:/(\w+))?$').firstMatch(path);
@@ -259,6 +283,49 @@ void main() {
     final prefs = await SharedPreferences.getInstance();
     expect(prefs.getString('server_url'), 'http://192.168.0.10:8080');
     expect(find.text('Входящие'), findsOneWidget);
+  });
+
+  testWidgets('новое письмо появляется сразу, с плашкой «Открыть»', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({'session_token': 'tok'});
+    final gw = FakeGateway();
+    await tester.pumpWidget(
+      SecretaryApp(
+        api: ApiClient(httpClient: gw.client, baseUrl: 'http://gw'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Срочно: созвон'), findsNothing);
+
+    // Шлюз разобрал новое письмо и сообщил в ленту
+    gw.emails[9] = {
+      'uid': 9,
+      'from': 'boss@work.ru',
+      'subject': 'Срочно: созвон',
+      'body': 'Созвон через 10 минут',
+      'urgency': 'высокая',
+      'status': 'pending',
+    };
+    gw.push({
+      'type': 'new_email',
+      'uid': 9,
+      'from': 'boss@work.ru',
+      'subject': 'Срочно: созвон',
+      'status': 'pending',
+      'text': '⚡ Срочное письмо',
+      'important': true,
+    });
+    await tester.pump(); // ответ ленты
+    await tester.pump(const Duration(milliseconds: 400)); // перечитали список
+    await tester.pump(const Duration(milliseconds: 500)); // выехала плашка
+
+    expect(find.text('Срочно: созвон'), findsOneWidget);
+    expect(find.textContaining('⚡ Срочное письмо'), findsOneWidget);
+
+    await tester.tap(find.text('Открыть'));
+    await tester.pumpAndSettle();
+    expect(find.text('Созвон через 10 минут'), findsOneWidget);
   });
 
   test('даты по-русски', () {
