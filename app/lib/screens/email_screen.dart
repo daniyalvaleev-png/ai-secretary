@@ -305,7 +305,9 @@ class _EmailScreenState extends State<EmailScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Похоже на мошенничество',
+                  e.status == 'spam'
+                      ? 'Приглушено как спам'
+                      : 'Похоже на мошенничество',
                   style: TextStyle(
                     color: s.onErrorContainer,
                     fontWeight: FontWeight.w700,
@@ -522,6 +524,16 @@ class _EmailScreenState extends State<EmailScreen> {
             icon: const Icon(Icons.refresh),
             label: const Text('Повторить'),
             onPressed: () => _act('redraft'),
+          ),
+        ),
+      ]),
+      // Защита от бомбера могла ошибиться — возвращаем письмо в «ждут решения»
+      'spam' => bar([
+        Expanded(
+          child: OutlinedButton.icon(
+            icon: const Icon(Icons.restore),
+            label: const Text('Не спам'),
+            onPressed: () => _act('not_spam'),
           ),
         ),
       ]),

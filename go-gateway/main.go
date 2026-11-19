@@ -13,6 +13,8 @@ import (
 	"net/mail"
 	"os"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -114,29 +116,71 @@ func main() {
 	// API_CORS_ORIGINS — с каких адресов браузеру можно ходить в API (Flutter Web), через запятую
 	go startAPI(getenvDefault("API_ADDR", "127.0.0.1:8080"), strings.Split(os.Getenv("API_CORS_ORIGINS"), ","), app)
 
+	// Приёмная: что делать с новым письмом + защита от спама и бомбера (intake.go)
+	guard := NewGuard(loadGuardConfig())
+	guard.Known = isKnownSender
+	intake := &Intake{
+		Guard:  guard,
+		Events: events,
+		Analyze: func(from, subject, text string) (EmailDecision, error) {
+			return analyzeEmail(cfg.OllamaURL, cfg.OllamaModel, from, subject, text)
+		},
+		Done: markUIDProcessed,
+	}
+	if cfg.TgToken != "" && cfg.TgChatID != "" {
+		intake.Alert = func(uid uint32, from, subject string, d EmailDecision) {
+			if err := sendEmailAlert(cfg.TgToken, cfg.TgChatID, uid, buildTelegramAlert(from, subject, d)); err != nil {
+				log.Printf("⚠️ Не удалось отправить в Telegram: %v", err)
+			} else {
+				log.Println("📨 Уведомление отправлено в Telegram")
+			}
+		}
+		intake.Notice = func(text string) {
+			if err := sendTelegramMessage(cfg.TgToken, cfg.TgChatID, text); err != nil {
+				log.Printf("⚠️ Не удалось отправить в Telegram: %v", err)
+			}
+		}
+	} else {
+		log.Println("⚠️ Telegram не настроен. Добавь TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID в .env")
+	}
+
+	maxPerCheck := getenvInt("MAX_PER_CHECK", 20)
 	log.Printf("🚀 Шлюз запущен, проверяю почту каждые %s (Ctrl+C — стоп)", cfg.Interval)
 
 	for {
-		if err := checkMail(cfg, events); err != nil {
+		more, err := checkMail(cfg, intake, maxPerCheck)
+		if err != nil {
 			log.Printf("⚠️ Проверка почты упала: %v", err)
+		}
+		if more {
+			// Писем больше, чем берём за раз: следующую пачку — почти сразу, а не через CHECK_INTERVAL
+			time.Sleep(3 * time.Second)
+			continue
 		}
 		time.Sleep(cfg.Interval)
 	}
 }
 
-func checkMail(cfg Config, events *EventHub) error {
+// Сколько письма скачиваем: первые 512 КБ хватает на текст. Вложения на 25 МБ не тянем целиком
+const fetchBodyLimit = 512 << 10
+
+var fetchBodyItem = imap.FetchItem(fmt.Sprintf("BODY.PEEK[]<0.%d>", fetchBodyLimit))
+
+// checkMail забирает новые письма (не больше maxPerCheck за раз) и отдаёт их в приёмную.
+// more = true — в ящике остались ещё необработанные.
+func checkMail(cfg Config, intake *Intake, maxPerCheck int) (more bool, err error) {
 	c, err := client.DialTLS(cfg.Addr, nil)
 	if err != nil {
-		return fmt.Errorf("подключение к %s: %w", cfg.Addr, err)
+		return false, fmt.Errorf("подключение к %s: %w", cfg.Addr, err)
 	}
 	defer c.Logout()
 
 	if err := c.Login(cfg.Email, cfg.Password); err != nil {
-		return fmt.Errorf("авторизация (проверь .env): %w", err)
+		return false, fmt.Errorf("авторизация (проверь .env): %w", err)
 	}
 
 	if _, err := c.Select("INBOX", false); err != nil {
-		return fmt.Errorf("не открылся INBOX: %w", err)
+		return false, fmt.Errorf("не открылся INBOX: %w", err)
 	}
 
 	criteria := imap.NewSearchCriteria()
@@ -144,7 +188,7 @@ func checkMail(cfg Config, events *EventHub) error {
 
 	uids, err := c.UidSearch(criteria)
 	if err != nil {
-		return fmt.Errorf("поиск писем: %w", err)
+		return false, fmt.Errorf("поиск писем: %w", err)
 	}
 
 	// Отсекаем уже обработанные ДО скачивания
@@ -157,19 +201,24 @@ func checkMail(cfg Config, events *EventHub) error {
 
 	if len(fresh) == 0 {
 		log.Println("📭 Новых писем нет")
-		return nil
+		return false, nil
 	}
 
-	log.Printf("🔥 Новых писем: %d", len(fresh))
+	// Старые — первыми. И не больше maxPerCheck за раз: при бомбере тысяча писем не займёт шлюз на часы,
+	// а остаток заберём следующей пачкой
+	slices.Sort(fresh)
+	if len(fresh) > maxPerCheck {
+		log.Printf("🔥 Новых писем: %d — беру первые %d, остальные следующей пачкой", len(fresh), maxPerCheck)
+		fresh = fresh[:maxPerCheck]
+		more = true
+	} else {
+		log.Printf("🔥 Новых писем: %d", len(fresh))
+	}
 
 	uidset := new(imap.SeqSet)
 	uidset.AddNum(fresh...)
 
-	items := []imap.FetchItem{
-		imap.FetchUid,
-		imap.FetchEnvelope,
-		imap.FetchItem("BODY.PEEK[]"),
-	}
+	items := []imap.FetchItem{imap.FetchUid, imap.FetchEnvelope, fetchBodyItem}
 
 	messages := make(chan *imap.Message, 10)
 	done := make(chan error, 1)
@@ -185,37 +234,29 @@ func checkMail(cfg Config, events *EventHub) error {
 	}
 
 	if err := <-done; err != nil {
-		return fmt.Errorf("fetch: %w", err)
+		return more, fmt.Errorf("fetch: %w", err)
 	}
 
 	for _, msg := range msgs {
-		processMessage(c, cfg, msg, events)
+		if m, ok := toIncoming(msg); ok {
+			intake.Handle(m)
+		}
 	}
 
-	return nil
+	return more, nil
 }
 
-func processMessage(c *client.Client, cfg Config, msg *imap.Message, events *EventHub) {
+// toIncoming достаёт из ответа IMAP отправителя, тему и само письмо
+func toIncoming(msg *imap.Message) (incoming, bool) {
 	if msg.Uid == 0 || msg.Envelope == nil {
-		return
+		return incoming{}, false
 	}
 
-	env := msg.Envelope
-
-	from := ""
-	if len(env.From) > 0 {
-		from = env.From[0].Address()
+	m := incoming{UID: msg.Uid, Subject: decodeHeader(msg.Envelope.Subject)}
+	if len(msg.Envelope.From) > 0 {
+		m.From = msg.Envelope.From[0].Address()
 	}
 
-	subject := decodeHeader(env.Subject)
-
-	if strings.Contains(from, "no-reply@accounts.google.com") {
-		log.Printf("⏭ Пропускаю служебное письмо от %s (UID %d)", from, msg.Uid)
-		markProcessed(c, msg.Uid)
-		return
-	}
-
-	var raw []byte
 	for _, lit := range msg.Body {
 		if lit == nil {
 			continue
@@ -225,59 +266,18 @@ func processMessage(c *client.Client, cfg Config, msg *imap.Message, events *Eve
 			log.Printf("⚠️ Не удалось прочитать тело письма UID %d: %v", msg.Uid, err)
 			continue
 		}
-		raw = b
+		m.Raw = b
 		break
 	}
+	return m, true
+}
 
-	if len(raw) == 0 {
-		log.Printf("⚠️ У письма UID %d пустое тело", msg.Uid)
-		markProcessed(c, msg.Uid)
-		return
+// getenvInt — число из .env; нет или кривое — значение по умолчанию
+func getenvInt(key string, def int) int {
+	if n, err := strconv.Atoi(os.Getenv(key)); err == nil && n > 0 {
+		return n
 	}
-
-	text := truncate(extractPlainText(raw), 4000)
-
-	decision, err := analyzeEmail(cfg.OllamaURL, cfg.OllamaModel, from, subject, text)
-	if err != nil {
-		log.Printf("❌ Ошибка Ollama для UID %d: %v", msg.Uid, err)
-		return // не помечаем — попробуем на следующем круге
-	}
-
-	fmt.Println(strings.Repeat("-", 60))
-	fmt.Printf("🆔 UID: %d\n👤 От: %s\n📌 Тема: %s\n", msg.Uid, from, subject)
-	fmt.Printf("🧠 Срочность: %s\n❓ Подтверждение: %t\n⚙️ Действие: %s\n",
-		decision.Urgency, decision.RequiresConfirmation, decision.SuggestedAction)
-	if decision.Suspicious {
-		fmt.Printf("🚨 Подозрительное: %s\n", decision.SuspicionReason)
-	}
-
-	stored := StoredEmail{
-		UID:                  msg.Uid,
-		From:                 from,
-		Subject:              subject,
-		Body:                 text,
-		ReceivedAt:           time.Now(),
-		Urgency:              decision.Urgency,
-		RequiresConfirmation: decision.RequiresConfirmation,
-		SuggestedAction:      decision.SuggestedAction,
-		Suspicious:           decision.Suspicious,
-		SuspicionReason:      decision.SuspicionReason,
-		Status:               "pending",
-	}
-	saveEmail(stored)
-	events.NewEmail(stored) // приложение покажет уведомление сразу
-
-	if shouldSendTelegramAlert(decision) {
-		if cfg.TgToken == "" || cfg.TgChatID == "" {
-			log.Println("⚠️ Telegram не настроен. Добавь TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID в .env")
-		} else if err := sendEmailAlert(cfg.TgToken, cfg.TgChatID, msg.Uid, buildTelegramAlert(from, subject, decision)); err != nil {
-			log.Printf("⚠️ Не удалось отправить в Telegram: %v", err)
-		} else {
-			log.Println("📨 Уведомление отправлено в Telegram")
-		}
-	}
-
-	markProcessed(c, msg.Uid)
+	return def
 }
 
 func getenvDefault(key, defaultValue string) string {
@@ -305,22 +305,6 @@ func truncate(s string, maxRunes int) string {
 	return string(runes[:maxRunes]) + "\n[обрезано]"
 }
 
-func markSeen(_ *client.Client, _ uint32) {
-	// Пока отключено намеренно.
-	//
-	// В go-imap v1.2.1 API для STORE/Flags ведёт себя неочевидно,
-	// а для MVP нам важнее не обрабатывать письмо повторно.
-	//
-	// Повторную обработку блокирует processed_uids.json.
-	//
-	// Позже, когда будем подключать Gmail API / нормальный почтовый провайдер,
-	// вернём реальное описание прочитанным.
-}
-
-func markProcessed(c *client.Client, uid uint32) {
-	markUIDProcessed(uid)
-	markSeen(c, uid)
-}
 
 func decodeBody(r io.Reader, transferEncoding string) ([]byte, error) {
 	enc := strings.ToLower(strings.TrimSpace(transferEncoding))

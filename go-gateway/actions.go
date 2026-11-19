@@ -116,6 +116,12 @@ func (a *App) Skip(uid uint32) (StoredEmail, error) {
 	return a.transition(uid, "skipped", "draft_ready", "draft_failed")
 }
 
+// NotSpam — защита от бомбера ошиблась: письмо возвращается в «ждут решения».
+// Пометка «подозрительное» остаётся — главной кнопкой будет «Отклонить», а ответить можно осознанно.
+func (a *App) NotSpam(uid uint32) (StoredEmail, error) {
+	return a.transition(uid, "pending", "spam")
+}
+
 func (a *App) Send(uid uint32) (StoredEmail, error) {
 	if a.Mailer == nil {
 		return StoredEmail{}, ErrNotConfigured{"отправка почты"}

@@ -117,6 +117,8 @@ class FakeGateway {
           e['draft'] = jsonDecode(req.body)['draft'];
         case 'send':
           e['status'] = failSend ? 'sending' : 'sent';
+        case 'not_spam':
+          e['status'] = 'pending';
       }
       return _json(e, m[2] == null || m[2] == 'draft' ? 200 : 202);
     }
@@ -342,6 +344,46 @@ void main() {
     expect(dayTitle(DateTime(2026, 11, 20), now: now), 'Пятница, 20 ноября');
     expect(senderName('"Иван Петров" <ivan@mail.ru>'), 'Иван Петров');
     expect(senderName('friend@mail.ru'), 'friend');
+  });
+
+  testWidgets('спам: видно причину, «Не спам» возвращает письмо', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({'session_token': 'tok'});
+    final gw = FakeGateway();
+    gw.emails[10] = {
+      'uid': 10,
+      'from': 'bomber@evil.ru',
+      'subject': 'Письмо №42',
+      'body': 'текст',
+      'urgency': 'низкая',
+      'status': 'spam',
+      'suspicious': true,
+      'suspicion_reason': 'похоже на бомбер: 42 письма за час с одного адреса',
+    };
+    await tester.pumpWidget(
+      SecretaryApp(
+        api: ApiClient(httpClient: gw.client, baseUrl: 'http://gw'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Спам не висит в «Ждут решения» — только во «Все»
+    expect(find.text('Письмо №42'), findsNothing);
+    await tester.tap(find.text('Все'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Письмо №42'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Приглушено как спам'), findsOneWidget);
+    expect(find.textContaining('бомбер'), findsOneWidget);
+    await tester.tap(find.text('Не спам'));
+    await tester.pumpAndSettle();
+
+    expect(gw.requests, contains('POST /api/emails/10/not_spam'));
+    expect(find.text('Ждёт решения'), findsOneWidget);
+    // Осторожность остаётся: главная кнопка — «Отклонить»
+    expect(find.widgetWithText(FilledButton, 'Отклонить'), findsOneWidget);
   });
 
   testWidgets('сессия протухла — назад на экран входа', (tester) async {

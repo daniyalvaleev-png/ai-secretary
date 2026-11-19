@@ -85,6 +85,7 @@ const _statusLabels = {
   'sent': 'Отправлено',
   'rejected': 'Отклонено',
   'skipped': 'Без ответа',
+  'spam': 'Спам',
   'confirmed': 'Подтверждено',
   'done': 'Готово',
   'approved': 'Одобрено',

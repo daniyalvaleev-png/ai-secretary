@@ -277,6 +277,15 @@ func markUIDProcessed(uid uint32) {
 	}
 }
 
+// isKnownSender — знакомый отправитель: на его письмо уже уходил наш ответ.
+// Во время сильного наплыва писем пропускаем только таких.
+func isKnownSender(addr string) bool {
+	var one int
+	err := db.QueryRow(`SELECT 1 FROM emails WHERE lower(from_addr) = lower(?)
+		AND status IN ('sent', 'approved', 'done') LIMIT 1`, addr).Scan(&one)
+	return err == nil
+}
+
 // resetStuckStatuses чинит письма, застрявшие посреди дела, когда шлюз выключили или ноут уснул:
 // горутина, которая их вела, умерла вместе с процессом, и сами они из этих статусов не выйдут
 func resetStuckStatuses() {

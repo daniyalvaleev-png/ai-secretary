@@ -21,6 +21,7 @@ var allowedStatuses = map[string]bool{
 	"skipped":      true,
 	"sent":         true,
 	"sending":      true,
+	"spam":         true, // приглушено защитой от бомбера (intake.go), без модели и уведомлений
 }
 
 // newAPIHandler собирает все маршруты. Отдельно от startAPI — чтобы тесты гоняли тот же самый обработчик.
@@ -45,6 +46,7 @@ func newAPIHandler(corsOrigins []string, app *App) http.Handler {
 	mux.Handle("POST /api/emails/{uid}/redraft", requireSession(act.handle(app.Redraft, http.StatusAccepted)))
 	mux.Handle("POST /api/emails/{uid}/send", requireSession(act.handle(app.Send, http.StatusAccepted)))
 	mux.Handle("POST /api/emails/{uid}/skip", requireSession(act.handle(app.Skip, http.StatusOK)))
+	mux.Handle("POST /api/emails/{uid}/not_spam", requireSession(act.handle(app.NotSpam, http.StatusOK)))
 	mux.Handle("POST /api/emails/{uid}/calendar", requireSession(act.handle(app.AddToCalendar, http.StatusAccepted)))
 	mux.Handle("POST /api/emails/{uid}/draft", requireSession(act.editDraft))
 	mux.Handle("GET /api/calendar", requireSession(act.listCalendar))
