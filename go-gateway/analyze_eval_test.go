@@ -4,7 +4,9 @@
 // Обычный `go test` его не запускает (нужен тег eval), потому что он медленный и зависит от модели.
 //
 // Запуск из go-gateway:
-//   go test -tags eval -run TestAnalyzeEval -v .
+//   go test -count=1 -tags eval -run TestAnalyzeEval -v .
+//
+// -count=1 обязательно: иначе Go может показать прошлый результат из кэша, а не прогнать модель заново.
 
 package main
 

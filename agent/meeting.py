@@ -16,6 +16,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_ollama import ChatOllama
 
+from safety import FENCE_RULE, fence_letter
+
 log = logging.getLogger("agent")
 
 WEEKDAYS = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
@@ -77,10 +79,12 @@ def extract_meeting(sender: str, subject: str, body: str, today: date) -> Extrac
 - "длительность_минут": если сказано, иначе 60.
 - "название": 2–5 слов, например «Встреча с Васей в парке».
 
+{FENCE_RULE}
+
 Таблица дат:
 {date_table(today)}"""
 
-    resp = extractor.invoke([SystemMessage(system), HumanMessage(f"От: {sender}\nТема: {subject}\n\n{body}")])
+    resp = extractor.invoke([SystemMessage(system), HumanMessage(fence_letter(sender, subject, body))])
     try:
         raw = json.loads(resp.content)
     except json.JSONDecodeError:

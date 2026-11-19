@@ -205,7 +205,10 @@ func (in *Intake) Handle(m incoming) {
 	if msg, err := mail.ReadMessage(bytes.NewReader(m.Raw)); err == nil {
 		header = msg.Header
 	}
-	text := truncate(extractPlainText(m.Raw), 4000)
+	// Невидимые символы вырезаем сразу: ими прячут команды для ИИ (injection.go).
+	// Дальше — в базу, модели, агенту и в приложение — идёт уже чистый текст
+	text := truncate(cleanText(extractPlainText(m.Raw)), 4000)
+	m.Subject = cleanText(m.Subject)
 
 	stored := StoredEmail{
 		UID:        m.UID,
