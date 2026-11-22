@@ -4,3 +4,5 @@ fastapi==0.162.0
 uvicorn==0.54.0
 langchain-mcp-adapters==0.3.2
 python-dotenv==1.2.4
+# Не наша зависимость (её тянет langgraph), но в 1.45.1 уязвимость CVE-2026-126360 — требуем исправленную
+opentelemetry-api>=1.45.2

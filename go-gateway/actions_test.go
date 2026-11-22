@@ -29,6 +29,11 @@ func (f *fakeAgent) server(t *testing.T) string {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		// Агент пускает только с ключом — как настоящий (agent/server.py)
+		if r.Header.Get("Authorization") != "Bearer agent-test-key" {
+			http.Error(w, "нужен ключ", http.StatusUnauthorized)
+			return
+		}
 		f.calls++
 		if f.fail {
 			http.Error(w, "boom", 500)
@@ -148,7 +153,7 @@ func newTestApp(t *testing.T) (*App, *fakeAgent, *fakeMailer, *recorder) {
 	agent := &fakeAgent{}
 	mailer := &fakeMailer{}
 	rec := &recorder{}
-	app := &App{AgentURL: agent.server(t), Mailer: mailer, Calendar: fakeCalendarMCP(t), Notify: rec}
+	app := &App{AgentURL: agent.server(t), AgentKey: "agent-test-key", Mailer: mailer, Calendar: fakeCalendarMCP(t), Notify: rec}
 	return app, agent, mailer, rec
 }
 

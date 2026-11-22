@@ -34,8 +34,9 @@ type draftMeeting struct {
 	End   string `json:"end"`
 }
 
-// requestDraft просит Python-агента (LangGraph) написать черновик ответа
-func requestDraft(agentURL string, e StoredEmail) (draftResponse, error) {
+// requestDraft просит Python-агента (LangGraph) написать черновик ответа.
+// apiKey — общий секрет AGENT_API_KEY: без него агент не отвечает никому, кроме шлюза.
+func requestDraft(agentURL, apiKey string, e StoredEmail) (draftResponse, error) {
 	body, err := json.Marshal(draftRequest{
 		UID:     e.UID,
 		Sender:  e.From,
@@ -46,12 +47,24 @@ func requestDraft(agentURL string, e StoredEmail) (draftResponse, error) {
 		return draftResponse{}, err
 	}
 
-	resp, err := agentHTTP.Post(agentURL+"/draft", "application/json", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, agentURL+"/draft", bytes.NewReader(body))
+	if err != nil {
+		return draftResponse{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	resp, err := agentHTTP.Do(req)
 	if err != nil {
 		return draftResponse{}, fmt.Errorf("агент недоступен (запущен uvicorn?): %w", err)
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusUnauthorized {
+		return draftResponse{}, fmt.Errorf("агент не пустил: AGENT_API_KEY в go-gateway/.env и agent/.env должны совпадать")
+	}
 	if resp.StatusCode != http.StatusOK {
 		return draftResponse{}, fmt.Errorf("агент вернул HTTP %d", resp.StatusCode)
 	}

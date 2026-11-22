@@ -96,7 +96,15 @@ func main() {
 	}
 	// Лента событий для приложения: новые письма и результаты фоновой работы
 	events := NewEventHub(200)
-	app := &App{AgentURL: getenvDefault("AGENT_URL", "http://127.0.0.1:8090"), Mailer: mailer, Events: events}
+	app := &App{
+		AgentURL: getenvDefault("AGENT_URL", "http://127.0.0.1:8090"),
+		AgentKey: os.Getenv("AGENT_API_KEY"),
+		Mailer:   mailer,
+		Events:   events,
+	}
+	if app.AgentKey == "" {
+		log.Println("⚠️ Нет AGENT_API_KEY в .env — агент откажется писать черновики. Ключ тот же, что в agent/.env")
+	}
 
 	// Календарь необязателен: нет ключа — «В календарь» ответит, что он не настроен
 	if key := os.Getenv("CALENDAR_API_KEY"); key != "" {

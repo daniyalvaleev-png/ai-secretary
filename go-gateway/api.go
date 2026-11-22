@@ -52,9 +52,11 @@ func newAPIHandler(corsOrigins []string, app *App) http.Handler {
 	mux.Handle("GET /api/calendar", requireSession(act.listCalendar))
 
 	// Лента событий: приложение узнаёт о новых письмах и результатах сразу, без перечитывания списка
-	mux.Handle("GET /api/events", requireSession(handleEvents(app.Events)))
+	mux.Handle("GET /api/events", requireSession(handleEvents(app.Events, newStreamLimiter(3))))
 
-	return withCORS(corsOrigins, mux)
+	// Снаружи внутрь: CORS (в том числе на ответ 429 — чтобы браузер его прочитал) → заголовки → лимит → маршруты
+	limiter := newRateLimiter(getenvInt("API_RATE_PER_MIN", 300))
+	return withCORS(corsOrigins, securityHeaders(limiter.middleware(mux)))
 }
 
 // startAPI поднимает HTTP API. Блокирует, поэтому запускаем в горутине.
@@ -72,6 +74,7 @@ func startAPI(addr string, corsOrigins []string, app *App) {
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    64 << 10, // заголовки больше 64 КБ — это не наше приложение
 	}
 
 	log.Printf("🌐 HTTP API слушает http://%s", addr)

@@ -193,7 +193,7 @@ const eventsWait = 25 * time.Second // меньше WriteTimeout сервера 
 
 // GET /api/events?after=N → {"events":[...], "last_id": M}
 // Без after — сразу отвечает номером последнего события: с него приложение и начинает слушать.
-func handleEvents(h *EventHub) http.HandlerFunc {
+func handleEvents(h *EventHub, streams *streamLimiter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if h == nil {
 			writeError(w, http.StatusServiceUnavailable, "лента событий не настроена")
@@ -211,6 +211,14 @@ func handleEvents(h *EventHub) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "after — номер события, число от 0")
 			return
 		}
+
+		// Каждая прослушка держит соединение до 25 секунд — у одного пользователя их не больше трёх
+		release, ok := streams.acquire(currentUser(r).ID)
+		if !ok {
+			writeError(w, http.StatusTooManyRequests, "слишком много открытых подключений к ленте")
+			return
+		}
+		defer release()
 
 		evs, last := h.Wait(r.Context(), after, eventsWait)
 		if evs == nil {

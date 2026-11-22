@@ -28,6 +28,7 @@ type Notifier interface {
 // App — всё, что нужно действиям. Пустые поля значат «не настроено».
 type App struct {
 	AgentURL string
+	AgentKey string // AGENT_API_KEY — пропуск к агенту
 	Mailer   ReplySender
 	Calendar *CalendarClient
 	Notify   Notifier
@@ -176,7 +177,7 @@ func (a *App) EditDraft(uid uint32, text string) (StoredEmail, error) {
 // --- Фоновая работа ---
 
 func (a *App) draft(e StoredEmail) {
-	resp, err := requestDraft(a.AgentURL, e)
+	resp, err := requestDraft(a.AgentURL, a.AgentKey, e)
 	if err != nil {
 		log.Printf("❌ Черновик для UID %d: %v", e.UID, err)
 		updateEmailStatus(e.UID, "draft_failed")

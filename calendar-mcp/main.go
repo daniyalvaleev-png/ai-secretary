@@ -49,7 +49,16 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", requireAPIKey(apiKey, handler))
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+		// Таймауты — чтобы медленный или зависший клиент не держал соединения вечно.
+		// WriteTimeout не ставим: MCP может держать поток ответа открытым
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    64 << 10,
+	}
+	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("❌ %v", err)
 	}
 }

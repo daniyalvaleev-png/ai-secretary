@@ -2,6 +2,8 @@ module go-gateway
 
 go 1.27.0
 
+toolchain go1.27.4
+
 require (
 	github.com/emersion/go-imap v1.2.1
 	github.com/joho/godotenv v1.5.1
